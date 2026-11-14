@@ -1,39 +1,18 @@
-let capturedSession = null;
-const tokenPattern = /^[0-9a-f]{64}$/i;
+(() => {
+  "use strict";
 
-function parseEnvelope(raw) {
-  let envelope = raw;
-  if (typeof envelope === "string") {
-    try { envelope = JSON.parse(envelope); } catch (_) { return null; }
-  }
-  if (!envelope || typeof envelope !== "object") return null;
-  let message = envelope.message || envelope;
-  if (typeof message === "string") {
-    try { message = JSON.parse(message); } catch (_) { return null; }
-  }
-  const command = String(message.command || "");
-  if (command !== "fxaccounts:login" && command !== "fxaccounts:oauth_login") return null;
-  const data = message.data || {};
-  const token = String(data.sessionToken || data.token || "").trim().toLowerCase();
-  return tokenPattern.test(token) ? token : null;
-}
+  const BRIDGE = "foxyforvps-fxa-bridge-v2";
+  const TOKEN_PATTERN = /^[0-9a-f]{64}$/i;
+  const ALLOWED_ORIGIN = "https://accounts.firefox.com";
 
-function capture(event) {
-  try {
-    const token = parseEnvelope(event.detail);
-    if (token) capturedSession = token;
-  } catch (_) {
-    // Do not log or expose authentication payloads.
-  }
-}
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || event.origin !== ALLOWED_ORIGIN) return;
+    const message = event.data;
+    if (!message || message.bridge !== BRIDGE || typeof message.token !== "string") return;
+    if (!TOKEN_PATTERN.test(message.token)) return;
 
-window.addEventListener("WebChannelMessageToChrome", capture, true);
-document.addEventListener("WebChannelMessageToChrome", capture, true);
-
-browser.runtime.onMessage.addListener((message) => {
-  if (message && message.type === "foxy-take-session") {
-    const token = capturedSession;
-    capturedSession = null;
-    return Promise.resolve({ token });
-  }
-});
+    // The background validates sender URL and tab ID and stores this only in storage.session.
+    browser.runtime.sendMessage({ type: "foxy-capture-session", token: message.token })
+      .catch(() => {});
+  }, false);
+})();

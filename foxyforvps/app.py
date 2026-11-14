@@ -11,9 +11,10 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
@@ -170,6 +171,24 @@ app.add_middleware(
     allow_methods=["POST", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
+
+
+@app.middleware("http")
+async def same_origin_guard(request: Request, call_next):
+    # The extension's one-time pairing endpoint is separately protected by a
+    # random, single-use code and strict CORS. All other writes must come from
+    # the panel's own origin; this prevents cross-site requests using cached
+    # HTTP Basic credentials on a publicly reachable hostname.
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/api/account/browser-session":
+        origin = request.headers.get("origin")
+        parsed = urlsplit(origin) if origin else None
+        host = request.headers.get("host", "")
+        if not parsed or parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != host.lower():
+            return JSONResponse({"detail": "Same-origin request required."}, status_code=403)
+    app_response = await call_next(request)
+    return app_response
+
+
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 

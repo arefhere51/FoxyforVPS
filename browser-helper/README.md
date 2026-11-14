@@ -1,16 +1,18 @@
-# FoxyforVPS Firefox Login Bridge (experimental)
+# FoxyforVPS Firefox Login Bridge
 
-This temporary Firefox WebExtension is an optional login bridge for the self-hosted panel. It does not ask for or read the Firefox Account password. It watches only `WebChannelMessageToChrome` events on `https://accounts.firefox.com/*`, holds a verified 64-hex session token in the active tab's memory, and sends it only after the user explicitly presses the popup button.
-
-The session token is posted to `http://127.0.0.1:8777/api/account/browser-session`, which is expected to be the local end of an SSH port forward to the VPS. The panel requires a high-entropy, one-use pairing code that expires after ten minutes. The backend validates the code, exchanges the session token for OAuth tokens, and never writes the short-lived session token to disk.
+This temporary Firefox WebExtension is an experimental login bridge for the self-hosted panel. It never asks for or reads the Firefox Account password. Version 0.2.0 listens for Firefox Accounts' WebChannel event in a small `MAIN`-world page hook, then relays only a validated 64-character session token through the isolated content script. The background stores the token in `browser.storage.session` (memory for the browser session, not disk), tied to the originating tab, for at most ten minutes. The popup consumes it once and the backend exchanges it for OAuth credentials.
 
 ## Load temporarily
 
-1. Establish and keep open `ssh -L 8777:127.0.0.1:8777 USER@VPS`.
-2. Open the dashboard, authenticate as panel admin, and create a browser-login pairing code.
-3. In desktop Firefox, visit `about:debugging#/runtime/this-firefox`.
-4. Choose **Load Temporary Add-on…** and select `manifest.json` in this folder.
-5. Open the official `accounts.firefox.com` login page in Firefox and complete the normal login.
-6. Click the extension button, paste the pairing code, and click its send button.
+1. Keep either the SSH tunnel open:
+   `ssh -L 8777:127.0.0.1:8778 USER@VPS`
+   or configure the panel with a public HTTPS hostname on port 8777.
+2. In the panel, authenticate and create a one-use pairing code (10-minute expiry).
+3. In Firefox 128+, visit `about:debugging#/runtime/this-firefox`, select **Load Temporary Add-on…**, and choose `manifest.json` in this folder.
+4. Open the extension popup and press **Open official Firefox sign-in**. The button opens the official login flow with `service=sync&context=fx_desktop_v3`.
+5. Sign in normally in that same tab. After Firefox redirects to account settings, leave that tab open.
+6. In the popup, enter the panel URL (`http://127.0.0.1:8777` through SSH, or `https://your-hostname:8777`), paste the pairing code, and press send. For a public HTTPS hostname, Firefox will request optional permission for that one host after the click.
 
-Firefox temporary add-ons are removed after the browser closes. The WebChannel event behavior is based on the FoxyVPN Android WebView integration and has not been validated against every Firefox desktop release/account state. If no login message arrives or Mozilla returns an anti-bot challenge (HTTP 406), do not enter the password into this project; the flow is unsupported in that environment.
+For the local option, the SSH tunnel maps the computer's `127.0.0.1:8777` to the VPS's private `127.0.0.1:8778`. For public access, the backend remains loopback-only and Caddy terminates TLS at `https://hostname:8777`; do not use plain HTTP on the public Internet.
+
+The token is deleted from extension session storage when consumed and is never written to `storage.local`. If the extension is removed on browser close, load it again. The bridge is not a Mozilla-supported integration and may stop working if Firefox changes its WebChannel behavior or the network rejects the sign-in request.

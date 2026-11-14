@@ -21,9 +21,13 @@ class WebTests(unittest.TestCase):
 
         with patch("foxyforvps.app._directory", new_callable=AsyncMock, return_value=[]):
             with TestClient(app) as client:
-                created = client.post("/api/account/pair", auth=("admin", "test-password-123"))
+                created = client.post("/api/account/pair", auth=("admin", "test-password-123"), headers={"origin": "http://testserver"})
                 self.assertEqual(created.status_code, 200)
                 code = created.json()["pair_code"]
+                missing_origin = client.post("/api/account/pair", auth=("admin", "test-password-123"))
+                self.assertEqual(missing_origin.status_code, 403)
+                csrf = client.post("/api/account/pair", auth=("admin", "test-password-123"), headers={"origin": "https://attacker.example"})
+                self.assertEqual(csrf.status_code, 403)
                 invalid = client.post("/api/account/browser-session", json={
                     "pair_code": code,
                     "session_token": "z" * 64,
@@ -34,7 +38,7 @@ class WebTests(unittest.TestCase):
                     "session_token": "z" * 64,
                 })
                 self.assertEqual(reused.status_code, 403)
-                denied = client.post("/api/account/pair", auth=("admin", "wrong"))
+                denied = client.post("/api/account/pair", auth=("admin", "wrong"), headers={"origin": "http://testserver"})
                 self.assertEqual(denied.status_code, 401)
 
 

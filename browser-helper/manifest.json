@@ -1,13 +1,33 @@
 {
   "manifest_version": 3,
   "name": "FoxyforVPS Firefox Login Bridge",
-  "version": "0.1.0",
-  "description": "Forwards a one-time Firefox Accounts login session from the official login page to the user's loopback SSH tunnel.",
+  "version": "0.2.0",
+  "description": "Captures the official Firefox Accounts WebChannel login event and forwards one session token only after the user's click.",
   "permissions": [
     "activeTab",
-    "tabs"
+    "tabs",
+    "storage"
   ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
   "content_scripts": [
+    {
+      "matches": [
+        "https://accounts.firefox.com/*"
+      ],
+      "js": [
+        "page-hook.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://accounts.firefox.com/*"
@@ -16,17 +36,19 @@
         "content.js"
       ],
       "run_at": "document_start",
-      "all_frames": false
+      "all_frames": false,
+      "world": "ISOLATED"
     }
   ],
   "browser_specific_settings": {
     "gecko": {
-      "id": "foxyforvps-login-bridge@arefhere51"
+      "id": "foxyforvps-login-bridge@arefhere51",
+      "strict_min_version": "128.0"
     }
   },
   "host_permissions": [
-    "https://accounts.firefox.com/*",
-    "http://127.0.0.1:8777/*"
+    "http://127.0.0.1/*",
+    "https://accounts.firefox.com/*"
   ],
   "action": {
     "default_title": "FoxyforVPS Login",

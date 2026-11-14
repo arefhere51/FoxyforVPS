@@ -48,7 +48,9 @@ class CoreTests(unittest.TestCase):
         manifest = json.loads((root / "browser-helper" / "manifest.json").read_text())
         self.assertEqual(manifest["manifest_version"], 3)
         self.assertIn("https://accounts.firefox.com/*", manifest["host_permissions"])
-        self.assertIn("http://127.0.0.1:8777/*", manifest["host_permissions"])
+        self.assertIn("http://127.0.0.1/*", manifest["host_permissions"])
+        self.assertIn("https://*/*", manifest["optional_host_permissions"])
+        self.assertEqual(manifest["content_scripts"][0]["world"], "MAIN")
 
 
 if __name__ == "__main__":
