@@ -1,0 +1,25 @@
+[Unit]
+Description=FoxyforVPS local control panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/FoxyforVPS
+Environment=PYTHONUNBUFFERED=1
+Environment=FOXY_TOKEN_FILE=/var/lib/foxyforvps/bearer.token
+Environment=FOXY_ADMIN_USER=admin
+Environment=FOXY_ADMIN_PASSWORD_FILE=/etc/foxyforvps/admin-password
+ExecStart=/opt/FoxyforVPS/.venv/bin/uvicorn foxyforvps.app:app --host 127.0.0.1 --port 8777 --workers 1
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/foxyforvps /etc/foxyforvps /run/systemd
+
+[Install]
+WantedBy=multi-user.target

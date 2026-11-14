@@ -1,0 +1,23 @@
+[Unit]
+Description=FoxyforVPS per-location SOCKS5 tunnels
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=FOXY_TOKEN_FILE=/var/lib/foxyforvps/bearer.token
+ExecStartPre=/usr/local/bin/foxy-sing-box check -c /etc/foxyforvps/sing-box.json
+ExecStart=/usr/local/bin/foxy-sing-box run -c /etc/foxyforvps/sing-box.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/foxyforvps /etc/foxyforvps
+
+[Install]
+WantedBy=multi-user.target

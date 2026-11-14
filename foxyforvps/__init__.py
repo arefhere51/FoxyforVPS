@@ -1,0 +1,1 @@
+"""FoxyforVPS application package."""
