@@ -53,7 +53,22 @@ def _save_json(path: Path, value: dict) -> None:
 
 
 def _state() -> dict:
-    return _read_json(STATE_FILE, {"locations": {}})
+    state = _read_json(STATE_FILE, {"locations": {}})
+    if not isinstance(state, dict):
+        state = {"locations": {}}
+    locations = state.setdefault("locations", {})
+    changed = False
+    if isinstance(locations, dict):
+        for settings in locations.values():
+            if not isinstance(settings, dict):
+                continue
+            for key in ("username", "password", "proxy_username", "proxy_password"):
+                if key in settings:
+                    settings.pop(key, None)
+                    changed = True
+    if changed:
+        _save_json(STATE_FILE, state)
+    return state
 
 
 def _password() -> str:
@@ -207,15 +222,13 @@ class FirefoxCredentialsInput(BaseModel):
 
 
 class AdminPasswordInput(BaseModel):
-    new_password: str = Field(min_length=12, max_length=128)
+    new_password: str = Field(min_length=1, max_length=256)
 
 
 class LocationUpdate(BaseModel):
     enabled: Optional[bool] = None
     port: Optional[int] = Field(default=None, ge=1024, le=65535)
     server_index: Optional[int] = Field(default=None, ge=0, le=1000)
-    proxy_username: Optional[str] = Field(default=None, max_length=64)
-    proxy_password: Optional[str] = Field(default=None, max_length=128)
 
 
 @app.get("/")
@@ -237,8 +250,6 @@ async def get_state(_=Depends(require_admin)):
         row.setdefault("enabled", False)
         row.setdefault("port", 2020 + index)
         row.setdefault("node", (item["servers"] or [None])[0])
-        row.setdefault("username", "proxy")
-        row.setdefault("password", secrets.token_urlsafe(18))
     _save_json(STATE_FILE, state)
     quota = _read_json(QUOTA_FILE, {})
     running = False
@@ -254,8 +265,6 @@ async def get_state(_=Depends(require_admin)):
         "locations": [
             {**item, "enabled": bool(configured[item["code"]].get("enabled")),
              "port": configured[item["code"]]["port"],
-             "proxy_username": configured[item["code"]].get("username", "proxy"),
-             "proxy_password": configured[item["code"]].get("password", ""),
              "node": configured[item["code"]].get("node") or (item["servers"] or [None])[0]}
             for item in countries
         ],
@@ -297,7 +306,10 @@ async def login_with_password(data: FirefoxCredentialsInput, _=Depends(require_a
 async def change_admin_password(data: AdminPasswordInput, _=Depends(require_admin)):
     new_password = data.new_password
     if _password_matches(new_password):
-        raise HTTPException(400, "Choose a different panel password.")
+        raise HTTPException(400, "رمز پنل جدید باید با رمز فعلی متفاوت باشد.")
+    if any(ord(char) < 32 or ord(char) == 127 for char in new_password):
+        data.new_password = ""
+        raise HTTPException(400, "از نویسه‌های کنترلی در رمز پنل استفاده نکن.")
     ADMIN_PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
     temp = ADMIN_PASSWORD_FILE.with_suffix(".tmp")
     try:
@@ -371,22 +383,12 @@ async def update_location(code: str, data: LocationUpdate, _=Depends(require_adm
         if data.server_index >= len(country["servers"]):
             raise HTTPException(400, "Invalid server selection")
         settings["node"] = country["servers"][data.server_index]
-    if data.proxy_username is not None:
-        if not data.proxy_username or ":" in data.proxy_username:
-            raise HTTPException(400, "Proxy username must be non-empty and must not contain ':'")
-        settings["username"] = data.proxy_username
-    if data.proxy_password is not None:
-        if len(data.proxy_password.encode()) < 12:
-            raise HTTPException(400, "Use a proxy password of at least 12 bytes")
-        settings["password"] = data.proxy_password
     if data.enabled is not None:
         if data.enabled:
             selected_port = int(settings.get("port", 2020 + countries.index(country)))
             for other_code, other in state["locations"].items():
                 if other_code != code and other.get("enabled") and int(other.get("port", 0)) == selected_port:
                     raise HTTPException(409, "That SOCKS5 port is already assigned to another enabled location.")
-            settings.setdefault("username", "proxy")
-            settings.setdefault("password", secrets.token_urlsafe(18))
             if selected_port < 1024:
                 settings["port"] = 2020 + countries.index(country)
         settings["enabled"] = bool(data.enabled)

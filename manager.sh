@@ -22,6 +22,7 @@ fetch_source(){
 
 install_or_update(){
   need_root
+  umask 022
   fetch_source
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
@@ -29,8 +30,7 @@ install_or_update(){
   install -d -m 0700 "$ETC_DIR" "$STATE_DIR"
   local new_admin_password=0
   if [[ ! -s "$ETC_DIR/admin-password" ]]; then
-    umask 077
-    openssl rand -hex 20 > "$ETC_DIR/admin-password"
+    (umask 077; openssl rand -hex 20 > "$ETC_DIR/admin-password")
     chmod 0600 "$ETC_DIR/admin-password"
     new_admin_password=1
   fi
@@ -39,6 +39,10 @@ install_or_update(){
   cp -a "$SOURCE_DIR/." "$APP_DIR/"
   python3 -m venv "$APP_DIR/.venv"
   "$APP_DIR/.venv/bin/pip" install --disable-pip-version-check -q -r "$APP_DIR/requirements.txt"
+  # The sign-in browser runs as a separate unprivileged user and must be able
+  # to traverse the venv and import packages. No secrets belong in the venv.
+  chmod 0755 "$APP_DIR" "$APP_DIR/.venv"
+  chmod -R a+rX "$APP_DIR/.venv"
   if ! id -u foxyvpsbrowser >/dev/null 2>&1; then
     useradd --system --home-dir /var/lib/foxyforvps-browser --create-home --shell /usr/sbin/nologin foxyvpsbrowser
     touch "$ETC_DIR/.created-browser-user"

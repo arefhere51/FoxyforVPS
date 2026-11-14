@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,9 +17,18 @@ class WebTests(unittest.TestCase):
         os.environ["FOXY_ADMIN_PASSWORD"] = "test-password-123"
         (root / "etc").mkdir(parents=True)
         (root / "etc" / "admin-password").write_text("test-password-123")
+        (root / "state").mkdir(parents=True)
+        old_state = {"locations": {"US": {"enabled": True, "port": 2020,
+                                             "username": "old-proxy-user", "password": "old-proxy-secret"}}}
+        (root / "state" / "settings.json").write_text(json.dumps(old_state))
 
         from fastapi.testclient import TestClient
-        from foxyforvps.app import app
+        from foxyforvps.app import app, _state
+
+        migrated = _state()
+        self.assertNotIn("username", migrated["locations"]["US"])
+        self.assertNotIn("password", migrated["locations"]["US"])
+        self.assertNotIn("old-proxy-secret", (root / "state" / "settings.json").read_text())
 
         with patch("foxyforvps.app._directory", new_callable=AsyncMock, return_value=[]):
             with TestClient(app) as client:
@@ -53,14 +63,14 @@ class WebTests(unittest.TestCase):
                 changed = client.post(
                     "/api/admin/password", auth=("admin", "test-password-123"),
                     headers={"origin": "http://testserver"},
-                    json={"new_password": "new-panel-password-12"},
+                    json={"new_password": "x"},
                 )
                 self.assertEqual(changed.status_code, 200)
                 stored = (root / "etc" / "admin-password").read_text()
                 self.assertTrue(stored.startswith("pbkdf2_sha256$"))
-                self.assertNotIn("new-panel-password-12", stored)
+                self.assertNotIn("x", stored)
                 self.assertEqual(client.get("/api/state", auth=("admin", "test-password-123")).status_code, 401)
-                self.assertEqual(client.get("/api/state", auth=("admin", "new-panel-password-12")).status_code, 200)
+                self.assertEqual(client.get("/api/state", auth=("admin", "x")).status_code, 200)
 
 
 if __name__ == "__main__":

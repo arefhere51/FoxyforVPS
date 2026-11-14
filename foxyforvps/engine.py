@@ -18,12 +18,10 @@ def build_config(locations: list[dict], state: dict) -> dict:
             continue
         in_tag, out_tag = f"socks-{code.lower()}", f"vpn-{code.lower()}"
         inbounds.append({
-            "type": "mixed",
+            "type": "socks",
             "tag": in_tag,
             "listen": "0.0.0.0",
             "listen_port": port,
-            "users": [{"username": settings["username"], "password": settings["password"]}]
-                if settings.get("username") and settings.get("password") else [],
         })
         outbounds.append({
             "type": "http",

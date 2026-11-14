@@ -21,7 +21,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(config["inbounds"][0]["listen_port"], 2020)
         self.assertEqual(config["inbounds"][1]["listen_port"], 2021)
         self.assertEqual(config["inbounds"][0]["listen"], "0.0.0.0")
-        self.assertEqual(config["inbounds"][0]["users"], [{"username": "u", "password": "long-secret"}])
+        self.assertEqual(config["inbounds"][0]["type"], "socks")
+        self.assertNotIn("users", config["inbounds"][0])
         self.assertEqual(config["outbounds"][1]["dynamic_bearer_token"], True)
         self.assertEqual(config["route"]["rules"], [{"inbound": ["socks-us"], "outbound": "vpn-us"}, {"inbound": ["socks-de"], "outbound": "vpn-de"}])
 
