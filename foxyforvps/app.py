@@ -15,13 +15,13 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .auth import AuthError, FirefoxAccount
 from .engine import write_config
+from .fxa_browser_login import FirefoxBrowserLoginError, capture_firefox_session
 from .servers import DirectoryError, fetch_locations
 
 STATE_DIR = Path(os.getenv("FOXY_STATE_DIR", "/var/lib/foxyforvps"))
@@ -63,11 +63,29 @@ def _password() -> str:
         return os.getenv("FOXY_ADMIN_PASSWORD", "")
 
 
+def _password_matches(candidate: str) -> bool:
+    stored = _password()
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, rounds, salt_hex, digest_hex = stored.split("$", 3)
+            digest = hashlib.pbkdf2_hmac("sha256", candidate.encode(), bytes.fromhex(salt_hex), int(rounds))
+            return hmac.compare_digest(digest.hex(), digest_hex)
+        except (ValueError, TypeError):
+            return False
+    return bool(stored) and hmac.compare_digest(candidate.encode(), stored.encode())
+
+
+def _hash_password(password: str) -> str:
+    rounds = 310_000
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, rounds)
+    return f"pbkdf2_sha256${rounds}${salt.hex()}${digest.hex()}"
+
+
 async def require_admin(credentials: HTTPBasicCredentials = Depends(security)):
-    expected = _password()
-    if not credentials or not expected or not (
+    if not credentials or not (
         hmac.compare_digest(credentials.username.encode(), ADMIN_USER.encode())
-        and hmac.compare_digest(credentials.password.encode(), expected.encode())
+        and _password_matches(credentials.password)
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required", headers={"WWW-Authenticate": "Basic"})
 
@@ -76,8 +94,7 @@ account = FirefoxAccount(STATE_DIR)
 locations_cache: list[dict] = []
 cache_at = 0.0
 refresh_task: asyncio.Task | None = None
-pending_pair_hash: str | None = None
-pending_pair_expires: float = 0.0
+fxa_login_lock = asyncio.Lock()
 
 
 async def _directory(force: bool = False) -> list[dict]:
@@ -165,21 +182,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="FoxyforVPS", docs_url=None, redoc_url=None, lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"moz-extension://.*",
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
-)
 
 
 @app.middleware("http")
 async def same_origin_guard(request: Request, call_next):
-    # The extension's one-time pairing endpoint is separately protected by a
-    # random, single-use code and strict CORS. All other writes must come from
-    # the panel's own origin; this prevents cross-site requests using cached
-    # HTTP Basic credentials on a publicly reachable hostname.
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/api/account/browser-session":
+    # All writes must come from the panel's own origin; this prevents cross-site
+    # requests using cached HTTP Basic credentials on a public hostname.
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         origin = request.headers.get("origin")
         parsed = urlsplit(origin) if origin else None
         host = request.headers.get("host", "")
@@ -192,13 +201,13 @@ async def same_origin_guard(request: Request, call_next):
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
-class SessionTokenInput(BaseModel):
-    session_token: str = Field(min_length=64, max_length=128)
+class FirefoxCredentialsInput(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=1, max_length=256)
 
 
-class PairSessionInput(BaseModel):
-    pair_code: str = Field(min_length=32, max_length=128)
-    session_token: str = Field(min_length=64, max_length=128)
+class AdminPasswordInput(BaseModel):
+    new_password: str = Field(min_length=12, max_length=128)
 
 
 class LocationUpdate(BaseModel):
@@ -253,50 +262,55 @@ async def get_state(_=Depends(require_admin)):
     }
 
 
-@app.post("/api/account/login")
-async def login(data: SessionTokenInput, _=Depends(require_admin)):
+@app.post("/api/account/login-password")
+async def login_with_password(data: FirefoxCredentialsInput, _=Depends(require_admin)):
+    email = data.email.strip()
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        data.password = ""
+        raise HTTPException(422, "ایمیل معتبر Firefox را وارد کن.")
+    password = data.password
+    data.password = ""
+    session_token = ""
     try:
-        quota = await account.sign_in_with_session_token(data.session_token)
-        _save_json(QUOTA_FILE, {**quota, "checked_at": int(time.time())})
-        _write_bearer((await account.proxy_pass())["token"])
-        try:
-            _apply_core(await _directory())
-        except Exception as exc:
-            raise HTTPException(500, f"Authentication succeeded, but tunnel engine did not start: {exc}") from exc
-        return {"ok": True, "quota": quota}
+        async with fxa_login_lock:
+            session_token = await asyncio.to_thread(capture_firefox_session, email, password)
+            quota = await account.sign_in_with_session_token(session_token)
+            pass_data = await account.proxy_pass()
+            _save_json(QUOTA_FILE, {**pass_data, **{k: v for k, v in quota.items() if v is not None}, "checked_at": int(time.time())})
+            _write_bearer(pass_data["token"])
+            try:
+                _apply_core(await _directory())
+            except Exception as exc:
+                raise HTTPException(500, f"Authentication succeeded, but tunnel engine did not start: {exc}") from exc
+            return {"ok": True, "quota": quota}
+    except FirefoxBrowserLoginError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except AuthError as exc:
         raise HTTPException(400, str(exc)) from exc
+    finally:
+        data.password = ""
+        password = ""
+        session_token = ""
 
 
-@app.post("/api/account/pair")
-async def create_pair(_=Depends(require_admin)):
-    global pending_pair_hash, pending_pair_expires
-    code = secrets.token_urlsafe(32)
-    pending_pair_hash = hashlib.sha256(code.encode()).hexdigest()
-    pending_pair_expires = time.time() + 600
-    return {"pair_code": code, "expires_in": 600, "login_url": "https://accounts.firefox.com/?context=fx_desktop_v3&service=sync&action=email"}
-
-
-@app.post("/api/account/browser-session")
-async def browser_session(data: PairSessionInput):
-    global pending_pair_hash, pending_pair_expires
-    supplied = hashlib.sha256(data.pair_code.encode()).hexdigest()
-    if (not pending_pair_hash or time.time() > pending_pair_expires
-            or not hmac.compare_digest(supplied, pending_pair_hash)):
-        raise HTTPException(403, "Pairing code is invalid, expired, or already used.")
-    pending_pair_hash = None
-    pending_pair_expires = 0
+@app.post("/api/admin/password")
+async def change_admin_password(data: AdminPasswordInput, _=Depends(require_admin)):
+    new_password = data.new_password
+    if _password_matches(new_password):
+        raise HTTPException(400, "Choose a different panel password.")
+    ADMIN_PASSWORD_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp = ADMIN_PASSWORD_FILE.with_suffix(".tmp")
     try:
-        quota = await account.sign_in_with_session_token(data.session_token)
-        pass_data = await account.proxy_pass()
-        _save_json(QUOTA_FILE, {**pass_data, **{k: v for k, v in quota.items() if v is not None}, "checked_at": int(time.time())})
-        _write_bearer(pass_data["token"])
-        _apply_core(await _directory())
-        return {"ok": True, "quota": quota}
-    except AuthError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(503, f"Login was accepted, but tunnel startup failed: {exc}") from exc
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(_hash_password(new_password))
+        os.chmod(temp, 0o600)
+        os.replace(temp, ADMIN_PASSWORD_FILE)
+        os.chmod(ADMIN_PASSWORD_FILE, 0o600)
+    finally:
+        data.new_password = ""
+        temp.unlink(missing_ok=True)
+    return {"ok": True, "reauthenticate": True}
 
 
 @app.post("/api/account/logout")

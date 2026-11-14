@@ -1,6 +1,4 @@
-import json
 import unittest
-from pathlib import Path
 
 from foxyforvps.auth import _hawk, _hkdf, _session_creds
 from foxyforvps.engine import build_config
@@ -42,16 +40,6 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(header.startswith('Hawk id='))
         self.assertIn('hash=', header)
         self.assertNotIn(raw, header)
-
-    def test_browser_helper_manifest_is_scoped_to_firefox_accounts(self):
-        root = Path(__file__).resolve().parents[1]
-        manifest = json.loads((root / "browser-helper" / "manifest.json").read_text())
-        self.assertEqual(manifest["manifest_version"], 3)
-        self.assertIn("https://accounts.firefox.com/*", manifest["host_permissions"])
-        self.assertIn("http://127.0.0.1/*", manifest["host_permissions"])
-        self.assertIn("https://*/*", manifest["optional_host_permissions"])
-        self.assertEqual(manifest["content_scripts"][0]["world"], "MAIN")
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,7 +25,7 @@ install_or_update(){
   fetch_source
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y ca-certificates curl git python3 python3-venv python3-pip build-essential golang-go openssl
+  apt-get install -y ca-certificates curl git python3 python3-venv python3-pip build-essential golang-go openssl util-linux
   install -d -m 0700 "$ETC_DIR" "$STATE_DIR"
   local new_admin_password=0
   if [[ ! -s "$ETC_DIR/admin-password" ]]; then
@@ -39,6 +39,17 @@ install_or_update(){
   cp -a "$SOURCE_DIR/." "$APP_DIR/"
   python3 -m venv "$APP_DIR/.venv"
   "$APP_DIR/.venv/bin/pip" install --disable-pip-version-check -q -r "$APP_DIR/requirements.txt"
+  if ! id -u foxyvpsbrowser >/dev/null 2>&1; then
+    useradd --system --home-dir /var/lib/foxyforvps-browser --create-home --shell /usr/sbin/nologin foxyvpsbrowser
+    touch "$ETC_DIR/.created-browser-user"
+    chmod 0600 "$ETC_DIR/.created-browser-user"
+  fi
+  install -d -o foxyvpsbrowser -g foxyvpsbrowser -m 0700 /var/lib/foxyforvps-browser
+  install -d -o root -g root -m 0755 /opt/foxyforvps-browsers
+  if ! PLAYWRIGHT_BROWSERS_PATH=/opt/foxyforvps-browsers "$APP_DIR/.venv/bin/python" -c 'from playwright.sync_api import sync_playwright; import os; p=sync_playwright().start(); ok=os.path.isfile(p.chromium.executable_path) and os.access(p.chromium.executable_path, os.X_OK); p.stop(); raise SystemExit(0 if ok else 1)' >/dev/null 2>&1; then
+    PLAYWRIGHT_BROWSERS_PATH=/opt/foxyforvps-browsers "$APP_DIR/.venv/bin/python" -m playwright install --with-deps chromium
+    chmod -R a+rX /opt/foxyforvps-browsers
+  fi
   install -m 0644 "$APP_DIR/systemd/foxyforvps-web.service" /etc/systemd/system/foxyforvps-web.service
   install -m 0644 "$APP_DIR/systemd/foxyforvps-core.service" /etc/systemd/system/foxyforvps-core.service
   install -m 0755 "$APP_DIR/manager.sh" /usr/local/bin/foxyforvpsctl
@@ -163,9 +174,15 @@ remove_app(){
   echo "This removes the application, Firefox OAuth credentials, proxy settings and bearer token."
   read -r -p "Type REMOVE to continue: " answer </dev/tty
   [[ "$answer" == "REMOVE" ]] || { echo "Cancelled."; return; }
+  local remove_browser_user=0
+  [[ -f "$ETC_DIR/.created-browser-user" ]] && remove_browser_user=1
   systemctl disable --now foxyforvps-public.service foxyforvps-web.service foxyforvps-core.service 2>/dev/null || true
   rm -f /etc/systemd/system/foxyforvps-public.service /etc/systemd/system/foxyforvps-web.service /etc/systemd/system/foxyforvps-core.service /usr/local/bin/foxyforvpsctl /usr/local/bin/foxy-sing-box "$ETC_DIR/Caddyfile" "$ETC_DIR/public-domain"
-  rm -rf "$APP_DIR" "$ETC_DIR" "$STATE_DIR" /usr/local/src/foxyforvps-sing-box
+  rm -rf "$APP_DIR" "$ETC_DIR" "$STATE_DIR" /var/lib/foxyforvps-browser /opt/foxyforvps-browsers /usr/local/src/foxyforvps-sing-box
+  if [[ "$remove_browser_user" == "1" ]]; then
+    userdel foxyvpsbrowser 2>/dev/null || true
+    groupdel foxyvpsbrowser 2>/dev/null || true
+  fi
   systemctl daemon-reload
   echo "FoxyforVPS and its local account tokens have been removed. The Caddy package (if installed) is left in place."
 }
