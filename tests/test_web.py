@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 
 class WebTests(unittest.TestCase):
-    def test_api_login_verification_same_origin_and_panel_password_rotation(self):
+    def test_browser_login_bridge_same_origin_verification_and_panel_password_rotation(self):
         root = Path(tempfile.mkdtemp(prefix="foxyforvps-test-"))
         os.environ["FOXY_STATE_DIR"] = str(root / "state")
         os.environ["FOXY_ETC_DIR"] = str(root / "etc")
@@ -25,7 +25,7 @@ class WebTests(unittest.TestCase):
         (root / "state" / "settings.json").write_text(json.dumps(old_state))
 
         from fastapi.testclient import TestClient
-        from foxyforvps.app import app, _normalize_public_domain, _state, login_attempts
+        from foxyforvps.app import app, _normalize_public_domain, _state, browser_login_attempts
 
         self.assertEqual(_normalize_public_domain("Alias.Example.com."), "alias.example.com")
         self.assertIsNone(_normalize_public_domain("127.0.0.1"))
@@ -34,6 +34,7 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("username", migrated["locations"]["US"])
         self.assertNotIn("password", migrated["locations"]["US"])
         self.assertNotIn("old-proxy-secret", (root / "state" / "settings.json").read_text())
+        browser_login_attempts.clear()
 
         with patch("foxyforvps.app._directory", new_callable=AsyncMock, return_value=[]):
             with TestClient(app, client=("127.0.0.1", 12345)) as client:
@@ -47,72 +48,75 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(wrong_ip.status_code, 403)
                 self.assertEqual(client.get("/api/tls/authorize?domain=127.0.0.1").status_code, 403)
 
+                headers = {"origin": "http://testserver"}
                 no_origin = client.post(
-                    "/api/account/login-password", auth=("admin", "test-password-123"),
-                    json={"email": "user@example.com", "password": "temporary-secret"},
+                    "/api/account/browser-login/start", auth=("admin", "test-password-123"), json={},
                 )
                 self.assertEqual(no_origin.status_code, 403)
                 csrf = client.post(
-                    "/api/account/login-password", auth=("admin", "test-password-123"),
-                    headers={"origin": "https://attacker.example"},
-                    json={"email": "user@example.com", "password": "temporary-secret"},
+                    "/api/account/browser-login/start", auth=("admin", "test-password-123"),
+                    headers={"origin": "https://attacker.example"}, json={},
                 )
                 self.assertEqual(csrf.status_code, 403)
                 self.assertEqual(client.get("/api/state", auth=("admin", "wrong")).status_code, 401)
+                self.assertEqual(client.post(
+                    "/api/account/login-password", auth=("admin", "test-password-123"),
+                    headers=headers, json={"email": "user@example.com", "password": "temporary-secret"},
+                ).status_code, 404)
 
-                with patch("foxyforvps.app.start_password_login", new_callable=AsyncMock,
-                           return_value={"stage": "verified", "email": "user@example.com", "session_token": "a" * 64}) as start, \
-                     patch("foxyforvps.app.account.sign_in_with_session_token", new_callable=AsyncMock,
-                           return_value={"quota_remaining": 500}), \
-                     patch("foxyforvps.app.account.proxy_pass", new_callable=AsyncMock,
-                           return_value={"token": "proxy-pass", "quota_remaining": 500}), \
-                     patch("foxyforvps.app._save_json"), patch("foxyforvps.app._write_bearer"), \
-                     patch("foxyforvps.app._apply_core"):
-                    login = client.post(
-                        "/api/account/login-password", auth=("admin", "test-password-123"),
-                        headers={"origin": "http://testserver"},
-                        json={"email": "user@example.com", "password": "temporary-secret"},
-                    )
-                self.assertEqual(login.status_code, 200)
-                self.assertNotIn("temporary-secret", login.text)
-                start.assert_awaited_once()
-                self.assertEqual(start.await_args.args[2], "temporary-secret")
+                started = client.post(
+                    "/api/account/browser-login/start", auth=("admin", "test-password-123"),
+                    headers=headers, json={},
+                )
+                self.assertEqual(started.status_code, 200)
+                start_data = started.json()
+                attempt_id, nonce = start_data["attempt_id"], start_data["nonce"]
+                self.assertEqual(start_data["login_url"],
+                    "https://accounts.firefox.com/?context=fx_desktop_v3&service=sync&action=email")
+                token = "a" * 64
 
-                login_attempts.clear()
-                with patch("foxyforvps.app.start_password_login", new_callable=AsyncMock,
-                           return_value={"stage": "email_code", "email": "user@example.com",
-                                         "session_token": "b" * 64, "message": "enter code"}):
+                bad_nonce = client.post(
+                    f"/api/account/browser-login/{attempt_id}/session",
+                    auth=("admin", "test-password-123"), headers=headers,
+                    json={"nonce": "z" * len(nonce), "email": "user@example.com", "session_token": token},
+                )
+                self.assertEqual(bad_nonce.status_code, 403)
+
+                with patch("foxyforvps.app.account.session_status", new_callable=AsyncMock,
+                           return_value={"verified": False, "email": "user@example.com"}):
                     pending = client.post(
-                        "/api/account/login-password", auth=("admin", "test-password-123"),
-                        headers={"origin": "http://testserver"},
-                        json={"email": "user@example.com", "password": "temporary-secret"},
+                        f"/api/account/browser-login/{attempt_id}/session",
+                        auth=("admin", "test-password-123"), headers=headers,
+                        json={"nonce": nonce, "email": "user@example.com", "session_token": token},
                     )
-                self.assertEqual(pending.status_code, 200)
-                self.assertEqual(pending.json()["stage"], "email_code")
-                self.assertNotIn("session_token", pending.text)
-                self.assertNotIn("temporary-secret", pending.text)
-                attempt_id = pending.json()["attempt_id"]
+                    self.assertEqual(pending.status_code, 200)
+                    self.assertEqual(pending.json()["stage"], "waiting_verification")
+                    self.assertNotIn(token, pending.text)
+                    self.assertNotIn("session_token", pending.text)
+                    self.assertEqual(client.get(
+                        f"/api/account/browser-login/{attempt_id}", auth=("admin", "test-password-123"),
+                    ).json()["stage"], "waiting_verification")
 
-                with patch("foxyforvps.app.verify_login_step", new_callable=AsyncMock, return_value=True), \
+                with patch("foxyforvps.app.account.session_status", new_callable=AsyncMock,
+                           return_value={"verified": True, "email": "user@example.com"}), \
                      patch("foxyforvps.app.account.sign_in_with_session_token", new_callable=AsyncMock,
                            return_value={"quota_remaining": 400}), \
                      patch("foxyforvps.app.account.proxy_pass", new_callable=AsyncMock,
                            return_value={"token": "proxy-pass", "quota_remaining": 400}), \
                      patch("foxyforvps.app._save_json"), patch("foxyforvps.app._write_bearer"), \
                      patch("foxyforvps.app._apply_core"):
-                    verified = client.post(
-                        "/api/account/login-verify", auth=("admin", "test-password-123"),
-                        headers={"origin": "http://testserver"},
-                        json={"attempt_id": attempt_id, "code": "123456"},
+                    completed = client.get(
+                        f"/api/account/browser-login/{attempt_id}", auth=("admin", "test-password-123"),
                     )
-                self.assertEqual(verified.status_code, 200)
-                self.assertNotIn("b" * 64, verified.text)
-                self.assertNotIn(attempt_id, login_attempts)
+                self.assertEqual(completed.status_code, 200)
+                self.assertTrue(completed.json()["ok"])
+                self.assertNotIn(token, completed.text)
+                self.assertNotIn(attempt_id, browser_login_attempts)
 
                 with patch("foxyforvps.app._directory", new_callable=AsyncMock, return_value=[]):
                     changed = client.post(
                         "/api/admin/password", auth=("admin", "test-password-123"),
-                        headers={"origin": "http://testserver"}, json={"new_password": "x"},
+                        headers=headers, json={"new_password": "x"},
                     )
                 self.assertEqual(changed.status_code, 200)
                 stored = (root / "etc" / "admin-password").read_text()

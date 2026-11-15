@@ -2,17 +2,11 @@
 
 ## ورود Firefox فعلی
 
-پنل از API مستقیم حساب Firefox استفاده می‌کند و دیگر WebExtension یا Chromium لازم ندارد. گذرواژه به `authPW` مشتق می‌شود و برای endpoint ورود ارسال می‌شود. کد ایمیل، TOTP، لینک تأیید و کد رفع مسدودی در صورت درخواست FxA، مرحله‌ای در خود پنل دارند. جزئیات در [FXA-AUTH-FLOW.md](FXA-AUTH-FLOW.md) آمده است.
+پنل دیگر فرم رمز Firefox یا direct-password API login ندارد. ورود در سایت رسمی Firefox Accounts انجام می‌شود و افزونهٔ `browser-extension/` بعد از تأیید کاربر نشست موقت را برمی‌گرداند. راهنمای نصب در [browser-login.md](browser-login.md) است.
 
-HTTP 406 از Firefox Accounts یعنی سرور یک چالش امنیتی برگردانده است. این نسخهٔ FoxyforVPS چالش را دور نمی‌زند؛ پیام خطای مشخص می‌دهد و توقف می‌کند. هیچ Chromium یا پروفایل مرورگر برای login ساخته نمی‌شود. تلاش‌های تأیید فقط در حافظه نگهداری می‌شوند و پس از ۱۵ دقیقه یا restart سرویس از بین می‌روند.
+اگر پنجره باز نمی‌شود، popupها را برای دامنهٔ پنل مجاز کن. اگر افزونه آماده نیست، آن را در Firefox جاری بارگذاری کن. اگر ورود صفحه کامل می‌شود اما backend HTTP 406 می‌گیرد، محدودیت درخواست‌های VPS هنوز برقرار است؛ این flow CAPTCHA یا کنترل ضدربات را دور نمی‌زند.
 
-## اگر ورود API شکست خورد
-
-1. مطمئن شو VPS به `api.accounts.firefox.com` دسترسی HTTPS دارد.
-2. مطمئن شو ایمیل/رمز درست است و اگر Firefox کد ایمیل یا TOTP خواسته، همان کد تازه را وارد کن.
-3. برای HTTP 406، تلاش را تکرار پشت‌سرهم نکن؛ محدودیت امنیتی یا fingerprint شبکه ممکن است مانع شود. این نسخه چالش را حل نمی‌کند.
-4. رمز، کد ایمیل، TOTP، session token و خروجی کامل درخواست‌ها را در issue یا گفتگو نفرست.
-5. پنل عمومی باید HTTPS روی پورت 8777 باشد؛ HTTP عمومی پشتیبانی نمی‌شود.
+گذرواژه و کدهای تأیید را فقط در صفحهٔ Mozilla وارد کن. Session token یا فایل `account.json` را در issue یا گفتگو نفرست. پس از لغو یا پایان مهلت، تلاش موقت از حافظه حذف می‌شود.
 
 ## پنل عمومی
 
@@ -20,8 +14,8 @@ backend روی loopback VPS و پورت 8778 می‌ماند؛ دسترسی publ
 
 ## منابع
 
+- Arman VPN browser sign-in flow: https://github.com/armanlife/firefox-vpn-client/blob/main/app/lib/ui/browser_signin.dart
 - FoxyVPN WebView/WebChannel bridge: https://github.com/Vauth/FoxyVPN/blob/main/app/src/main/java/com/vauth/foxyvpn/ui/screens/BrowserLoginScreen.kt
-- Arman VPN API login inspection: https://github.com/armanlife/arman-vpn-client/blob/main/core/internal/fxa/fxa.go
-- Arman VPN FxA derivation/Hawk: https://github.com/armanlife/arman-vpn-client/blob/main/core/internal/fxa/hawk.go
 - Mozilla WebChannel reference: https://mozilla.github.io/ecosystem-platform/reference/webchannels
+- Mozilla FxA integration overview: https://mozilla.github.io/ecosystem-platform/relying-parties/tutorials/integration-with-fxa
 - Caddy automatic HTTPS: https://caddyserver.com/docs/automatic-https

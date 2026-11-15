@@ -24,7 +24,6 @@ from pydantic import BaseModel, Field
 
 from .auth import AuthError, FirefoxAccount
 from .engine import write_config
-from .fxa_password_login import LoginRejected, start_password_login, verify_login_step
 from .servers import DirectoryError, fetch_locations
 
 STATE_DIR = Path(os.getenv("FOXY_STATE_DIR", "/var/lib/foxyforvps"))
@@ -187,9 +186,9 @@ locations_cache: list[dict] = []
 cache_at = 0.0
 refresh_task: asyncio.Task | None = None
 fxa_login_lock = asyncio.Lock()
-login_attempts: dict[str, dict] = {}
-LOGIN_ATTEMPT_TTL = 15 * 60
-LOGIN_ATTEMPT_LIMIT = 16
+browser_login_attempts: dict[str, dict] = {}
+BROWSER_LOGIN_TTL = 15 * 60
+BROWSER_LOGIN_LIMIT = 8
 
 
 async def _directory(force: bool = False) -> list[dict]:
@@ -313,16 +312,10 @@ async def authorize_dynamic_certificate(request: Request, domain: str = ""):
     return Response(status_code=204)
 
 
-class FirefoxCredentialsInput(BaseModel):
-    email: str = Field(min_length=5, max_length=254)
-    password: str = Field(min_length=1, max_length=256)
-    unblock_code: str = Field(default="", max_length=64)
-
-
-class LoginVerificationInput(BaseModel):
-    attempt_id: str = Field(min_length=20, max_length=128)
-    code: str = Field(default="", max_length=64)
-    confirmed: bool = False
+class BrowserSessionInput(BaseModel):
+    nonce: str = Field(min_length=32, max_length=128)
+    email: str = Field(default="", max_length=254)
+    session_token: str = Field(min_length=64, max_length=64)
 
 
 class AdminPasswordInput(BaseModel):
@@ -375,54 +368,71 @@ async def get_state(_=Depends(require_admin)):
     }
 
 
-@app.post("/api/account/login-password")
-async def login_with_password(data: FirefoxCredentialsInput, _=Depends(require_admin)):
-    email = data.email.strip()
-    if "@" not in email or email.startswith("@") or email.endswith("@"):
-        data.password = ""
-        raise HTTPException(422, "ایمیل معتبر Firefox را وارد کن.")
-    password = data.password
-    unblock_code = data.unblock_code
-    data.password = ""
-    data.unblock_code = ""
+@app.post("/api/account/browser-login/start")
+async def start_browser_login(_=Depends(require_admin)):
+    await _prune_browser_login_attempts()
+    if len(browser_login_attempts) >= BROWSER_LOGIN_LIMIT:
+        raise HTTPException(429, "ورود مرورگری موقت زیادی باز است؛ موارد قبلی را ببند یا کمی صبر کن.")
+    attempt_id = secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(32)
+    browser_login_attempts[attempt_id] = {
+        "nonce": nonce,
+        "email": "",
+        "session_token": "",
+        "created": time.monotonic(),
+        "processing": False,
+    }
+    return {
+        "ok": True,
+        "attempt_id": attempt_id,
+        "nonce": nonce,
+        "login_url": "https://accounts.firefox.com/?context=fx_desktop_v3&service=sync&action=email",
+    }
+
+
+async def _prune_browser_login_attempts() -> None:
+    now = time.monotonic()
+    for attempt_id, attempt in list(browser_login_attempts.items()):
+        if now - attempt["created"] > BROWSER_LOGIN_TTL:
+            browser_login_attempts.pop(attempt_id, None)
+            token = attempt.pop("session_token", "")
+            if token:
+                await account.destroy_session(token)
+
+
+async def _check_or_finish_browser_login(attempt_id: str, attempt: dict) -> dict:
+    token = attempt.get("session_token", "")
+    if not token:
+        return {"ok": False, "stage": "waiting_browser"}
+    if attempt.get("processing"):
+        return {"ok": False, "stage": "processing"}
+    attempt["processing"] = True
+    remove_attempt = False
     try:
         async with fxa_login_lock:
-            result = await start_password_login(account.http, email, password, unblock_code)
-            stage = result["stage"]
-            if stage == "unblock_code":
-                return {"ok": False, "stage": stage, "email": result["email"], "message": result["message"]}
-            if stage != "verified":
-                _prune_login_attempts()
-                if len(login_attempts) >= LOGIN_ATTEMPT_LIMIT:
-                    raise HTTPException(429, "تلاش‌های ورود موقت زیادی باز است؛ کمی صبر کن و دوباره شروع کن.")
-                attempt_id = secrets.token_urlsafe(24)
-                login_attempts[attempt_id] = {
-                    "email": result["email"],
-                    "session_token": result["session_token"],
-                    "stage": stage,
-                    "created": time.monotonic(),
-                    "tries": 0,
-                }
-                return {"ok": False, "stage": stage, "attempt_id": attempt_id, "email": result["email"], "message": result["message"]}
-            quota = await _finish_account_login(result["session_token"])
+            session = await account.session_status(token)
+            if not session["verified"]:
+                return {"ok": False, "stage": "waiting_verification", "email": attempt.get("email", "")}
+            quota = await _finish_account_login(token)
+            remove_attempt = True
             return {"ok": True, "quota": quota}
-    except LoginRejected as exc:
-        raise HTTPException(400, str(exc)) from exc
     except AuthError as exc:
+        await account.destroy_session(token)
+        remove_attempt = True
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(500, f"Authentication succeeded, but tunnel engine did not start: {exc}") from exc
+        remove_attempt = True
+        raise HTTPException(500, f"ورود Firefox تکمیل شد، اما موتور تونل اجرا نشد: {exc}") from exc
+    except Exception as exc:
+        await account.destroy_session(token)
+        remove_attempt = True
+        raise HTTPException(502, "ارتباط با Firefox برای بررسی نشست کامل نشد؛ ورود را دوباره آغاز کن.") from exc
     finally:
-        data.password = ""
-        data.unblock_code = ""
-        password = ""
-
-
-def _prune_login_attempts() -> None:
-    now = time.monotonic()
-    for attempt_id, attempt in list(login_attempts.items()):
-        if now - attempt["created"] > LOGIN_ATTEMPT_TTL:
-            login_attempts.pop(attempt_id, None)
+        if remove_attempt:
+            browser_login_attempts.pop(attempt_id, None)
+            attempt["session_token"] = ""
+        else:
+            attempt["processing"] = False
 
 
 async def _finish_account_login(session_token: str) -> dict:
@@ -434,39 +444,46 @@ async def _finish_account_login(session_token: str) -> dict:
     return quota
 
 
-@app.post("/api/account/login-verify")
-async def verify_account_login(data: LoginVerificationInput, _=Depends(require_admin)):
-    _prune_login_attempts()
-    attempt = login_attempts.get(data.attempt_id)
+@app.post("/api/account/browser-login/{attempt_id}/session")
+async def receive_browser_session(attempt_id: str, data: BrowserSessionInput, _=Depends(require_admin)):
+    await _prune_browser_login_attempts()
+    attempt = browser_login_attempts.get(attempt_id)
     if not attempt:
-        raise HTTPException(404, "مرحلهٔ ورود پیدا نشد یا منقضی شده است؛ دوباره وارد شو.")
-    stage = attempt["stage"]
-    if stage == "email_link" and not data.confirmed:
-        raise HTTPException(400, "ابتدا لینک تأیید Firefox را باز کن.")
-    try:
-        async with fxa_login_lock:
-            confirmed = await verify_login_step(account.http, attempt["session_token"], stage, data.code)
-            if not confirmed:
-                raise HTTPException(409, "Firefox هنوز تأیید ایمیل را ثبت نکرده است؛ پس از کلیک لینک دوباره ادامه بده.")
-            quota = await _finish_account_login(attempt["session_token"])
-            login_attempts.pop(data.attempt_id, None)
-            return {"ok": True, "quota": quota}
-    except LoginRejected as exc:
-        attempt["tries"] += 1
-        if attempt["tries"] >= 5:
-            login_attempts.pop(data.attempt_id, None)
-            raise HTTPException(400, "تعداد تلاش‌های کد تأیید تمام شد؛ ورود را از ابتدا شروع کن.") from exc
-        raise HTTPException(400, str(exc)) from exc
-    except AuthError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except RuntimeError as exc:
-        login_attempts.pop(data.attempt_id, None)
-        raise HTTPException(500, f"ورود موفق شد، اما موتور تونل اجرا نشد: {exc}") from exc
+        data.session_token = ""
+        raise HTTPException(404, "درخواست ورود منقضی شده؛ دوباره شروع کن.")
+    if not hmac.compare_digest(str(attempt["nonce"]), data.nonce):
+        data.session_token = ""
+        raise HTTPException(403, "تأیید پل مرورگر معتبر نیست.")
+    if attempt.get("session_token"):
+        data.session_token = ""
+        raise HTTPException(409, "نشست مرورگر قبلاً دریافت شده است.")
+    token = data.session_token.strip().lower()
+    email = data.email.strip()
+    data.session_token = ""
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        raise HTTPException(422, "نشست موقت Firefox معتبر نیست.")
+    attempt["session_token"] = token
+    attempt["email"] = email
+    return await _check_or_finish_browser_login(attempt_id, attempt)
 
 
-@app.delete("/api/account/login-attempt/{attempt_id}")
-async def cancel_account_login(attempt_id: str, _=Depends(require_admin)):
-    login_attempts.pop(attempt_id, None)
+@app.get("/api/account/browser-login/{attempt_id}")
+async def browser_login_status(attempt_id: str, _=Depends(require_admin)):
+    await _prune_browser_login_attempts()
+    attempt = browser_login_attempts.get(attempt_id)
+    if not attempt:
+        raise HTTPException(404, "درخواست ورود منقضی شده یا لغو شده است.")
+    return await _check_or_finish_browser_login(attempt_id, attempt)
+
+
+@app.delete("/api/account/browser-login/{attempt_id}")
+async def cancel_browser_login(attempt_id: str, _=Depends(require_admin)):
+    attempt = browser_login_attempts.pop(attempt_id, None)
+    if attempt:
+        token = attempt.pop("session_token", "")
+        attempt["nonce"] = ""
+        if token:
+            await account.destroy_session(token)
     return {"ok": True}
 
 

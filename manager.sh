@@ -109,7 +109,9 @@ install_or_update(){
   fi
   install -d -m 0755 "$APP_DIR"
   cp -a "$SOURCE_DIR/." "$APP_DIR/"
-  rm -f "$APP_DIR/foxyforvps/fxa_browser_login.py" "$APP_DIR/tests/test_browser_login.py"
+  rm -f "$APP_DIR/foxyforvps/fxa_browser_login.py" "$APP_DIR/foxyforvps/fxa_password_login.py" \
+    "$APP_DIR/tests/test_browser_login.py" "$APP_DIR/tests/test_fxa_password_login.py"
+  rm -f "$APP_DIR/foxyforvps/__pycache__/fxa_password_login."*.pyc
   rm -rf "$APP_DIR/browser-helper" "$APP_DIR/.venv"
   python3 -m venv "$APP_DIR/.venv"
   "$APP_DIR/.venv/bin/pip" install --disable-pip-version-check -q -r "$APP_DIR/requirements.txt"

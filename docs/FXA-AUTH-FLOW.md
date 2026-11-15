@@ -11,22 +11,16 @@ Source references:
 
 ## Current FoxyforVPS flow
 
-The web panel does not use the browser extension or headless Chromium. It sends the email and password to the authenticated VPS backend over HTTPS (or an SSH tunnel). The backend derives FxA `authPW` using the account protocol and submits a direct `POST /v1/account/login` request. The plaintext password is not sent to the FxA login endpoint and is not written to persistent storage, command-line arguments, environment variables, or application logs.
+The panel opens the official Firefox Accounts Sync sign-in page with `context=fx_desktop_v3`, `service=sync`, and `action=email`. A narrowly scoped Firefox extension listens for the page's WebChannel messages `fxaccounts:login` and `fxaccounts:oauth_login`. The extension returns the session token to the exact opener origin only after a user confirmation dialog.
 
-If FxA requires email-code or TOTP verification, the API returns a temporary session token. FoxyforVPS keeps that token only in process memory, keyed by a random one-time attempt ID, with a 15-minute expiry and a five-try verification limit. Email-code and TOTP responses are submitted with Hawk authentication; email-link verification can be continued after the user clicks the link. Temporary attempts are deleted on completion/cancellation and disappear on process restart. The session token is exchanged through the existing OAuth path and a best-effort session-destroy request is made.
+The Firefox password and verification codes stay in Mozilla's page. The temporary session token is sent to the VPS over HTTPS or an SSH tunnel, held only in memory for at most 15 minutes, and checked while the user completes email/TOTP verification in the open browser page. Once verified, the backend exchanges it for the OAuth credentials needed by the VPN service and asks FxA to destroy the temporary session. OAuth credentials remain persisted on the VPS.
 
-A blocked-login response can trigger Firefox's email unblock-code flow. The password is not retained by the server: the user re-enters it together with the emailed unblock code. The backend sends only the derived `authPW` in the subsequent FxA login request.
+The bridge attempt is same-origin protected and bound to a random nonce. It does not expose a password form on the VPS and does not store the session token on disk.
 
 ## Anti-bot and transport boundary
 
-The API-login structure and derivation were inspected in the public Arman VPN client source:
+This is an unofficial integration based on the WebChannel flow used by Firefox Sync clients. It is not Mozilla's general OAuth integration. Public OAuth relying parties need registered clients and redirect URIs. WebChannel details or Firefox site behavior may change.
 
-- https://github.com/armanlife/arman-vpn-client/blob/main/core/internal/fxa/fxa.go
-- https://github.com/armanlife/arman-vpn-client/blob/main/core/internal/fxa/hawk.go
-- https://github.com/armanlife/arman-vpn-client/blob/main/core/internal/service/signin_flow.go
+Opening the page in a real Firefox browser can avoid sending the password from a VPS network fingerprint, but the session-status and OAuth requests still originate from the VPS. Either can still be blocked with HTTP 406. FoxyforVPS does not automate CAPTCHA or bypass anti-bot challenges.
 
-FoxyforVPS implements the direct login request and verification stages, but does **not** port Arman's custom HTTP-406/Fastly challenge solver. If Firefox Accounts responds with HTTP 406, FoxyforVPS reports the challenge and stops. It does not automate CAPTCHA or anti-bot challenge solving. The API, server-side policy, network egress and account security settings can all prevent direct login; success is not guaranteed.
-
-## Credential boundary
-
-The Firefox password traverses the VPS connection, so public panel access must use HTTPS and private access should use SSH tunneling. Root on the VPS can inspect application memory. OAuth access/refresh credentials required by the service remain in `/var/lib/foxyforvps/`; raw Firefox password and temporary session attempts are not persisted.
+For installation and user-visible security details, see [browser-login.md](browser-login.md).

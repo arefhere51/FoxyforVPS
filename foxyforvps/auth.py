@@ -112,45 +112,44 @@ class FirefoxAccount:
         token = "".join(session_token.split()).strip('"').lower()
         if len(token) != 64 or any(ch not in "0123456789abcdef" for ch in token):
             raise AuthError("A verified Firefox Accounts session token is required (64 hexadecimal characters).")
-        verified = await self._hawk_json(FXA_VERIFY, "GET", token)
-        if not verified.get("verified"):
+        session = await self.session_status(token)
+        if not session["verified"]:
             raise AuthError("The Firefox Accounts session is not verified. Complete the official browser sign-in first.")
-        verifier = _b64(secrets.token_bytes(32), True)
-        challenge = _b64(hashlib.sha256(verifier.encode("ascii")).digest(), True)
-        state = _b64(secrets.token_bytes(16), True)
-        auth = await self._hawk_json(FXA_AUTH, "POST", token, {
-            "client_id": FXA_CLIENT_ID,
-            "response_type": "code",
-            "scope": FXA_SCOPE,
-            "state": state,
-            "access_type": "offline",
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        })
-        code = str(auth.get("code", ""))
-        if not code or auth.get("state") != state:
-            raise AuthError("Firefox Accounts returned an invalid OAuth response.")
-        payload = {
-            "client_id": FXA_CLIENT_ID,
-            "grant_type": "authorization_code",
-            "code": code,
-            "code_verifier": verifier,
-        }
-        result = await self._token_request(payload)
-        if not result.get("access_token"):
-            raise AuthError("Firefox Accounts did not issue an access token.")
-        data = {
-            "access_token": result["access_token"],
-            "refresh_token": result.get("refresh_token"),
-            "expires_at": int(time.time()) + int(result.get("expires_in", 3600)),
-        }
-        self.save(data)
-        # The browser session token is single-use in this flow and is never persisted.
         try:
-            await self._hawk_json(FXA_DESTROY, "POST", token, {})
-        except Exception:
-            pass
-        return await self.quota()
+            verifier = _b64(secrets.token_bytes(32), True)
+            challenge = _b64(hashlib.sha256(verifier.encode("ascii")).digest(), True)
+            state = _b64(secrets.token_bytes(16), True)
+            auth = await self._hawk_json(FXA_AUTH, "POST", token, {
+                "client_id": FXA_CLIENT_ID,
+                "response_type": "code",
+                "scope": FXA_SCOPE,
+                "state": state,
+                "access_type": "offline",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            })
+            code = str(auth.get("code", ""))
+            if not code or auth.get("state") != state:
+                raise AuthError("Firefox Accounts returned an invalid OAuth response.")
+            payload = {
+                "client_id": FXA_CLIENT_ID,
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": verifier,
+            }
+            result = await self._token_request(payload)
+            if not result.get("access_token"):
+                raise AuthError("Firefox Accounts did not issue an access token.")
+            data = {
+                "access_token": result["access_token"],
+                "refresh_token": result.get("refresh_token"),
+                "expires_at": int(time.time()) + int(result.get("expires_in", 3600)),
+            }
+            self.save(data)
+            return await self.quota()
+        finally:
+            # The temporary browser session is only a bridge credential; persist OAuth tokens instead.
+            await self.destroy_session(token)
 
     async def _token_request(self, payload: dict) -> dict:
         last_error = None
@@ -167,6 +166,22 @@ class FirefoxAccount:
             except httpx.HTTPError as exc:
                 last_error = str(exc)
         raise AuthError(f"Could not exchange the Firefox Accounts login ( {last_error or 'network error'} ).")
+
+    async def session_status(self, session_token: str) -> dict:
+        token = "".join(session_token.split()).strip('"').lower()
+        if len(token) != 64 or any(ch not in "0123456789abcdef" for ch in token):
+            raise AuthError("Firefox Accounts browser session was invalid.")
+        result = await self._hawk_json(FXA_VERIFY, "GET", token)
+        return {"verified": bool(result.get("verified")), "email": str(result.get("email") or "")}
+
+    async def destroy_session(self, session_token: str) -> None:
+        token = "".join(session_token.split()).strip('"').lower()
+        if len(token) != 64 or any(ch not in "0123456789abcdef" for ch in token):
+            return
+        try:
+            await self._hawk_json(FXA_DESTROY, "POST", token, {})
+        except Exception:
+            pass
 
     async def access_token(self) -> str:
         data = self.load()
