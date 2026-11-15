@@ -5,6 +5,7 @@
 
   const TOKEN_RE = /^[0-9a-f]{64}$/i;
   const NONCE_RE = /^[A-Za-z0-9_-]{43}$/;
+  const PAGE_CHANNEL = 'foxyforvps:page-webchannel:v1';
   let bridge = null;
   let pendingSession = null;
   let delivering = false;
@@ -73,22 +74,16 @@
   });
 
   function sendWebChannelReply(id, messageId, command, data) {
-    const detail = { id, message: { messageId, command, data } };
-    for (const target of [window, document]) {
-      try {
-        target.dispatchEvent(new CustomEvent('WebChannelMessageToContent', { detail }));
-      } catch (_) {
-        // A duplicate reply is harmless; continue to the other target.
-      }
-    }
+    const detail = JSON.stringify({ id, message: { messageId, command, data } });
+    window.postMessage({ channel: PAGE_CHANNEL, direction: 'to-page', detail }, location.origin);
   }
 
   function handlePageMessage(event) {
-    let detail = event.detail;
-    if (typeof detail === 'string') {
-      try { detail = JSON.parse(detail); } catch (_) { return; }
-    }
-    try { detail = JSON.parse(JSON.stringify(detail)); } catch (_) { return; }
+    if (event.source !== window || event.origin !== location.origin) return;
+    const envelope = event.data;
+    if (!envelope || envelope.channel !== PAGE_CHANNEL || envelope.direction !== 'from-page' || typeof envelope.detail !== 'string') return;
+    let detail;
+    try { detail = JSON.parse(envelope.detail); } catch (_) { return; }
     if (!detail || typeof detail.id !== 'string' || !detail.message || typeof detail.message !== 'object') return;
 
     const message = detail.message;
@@ -115,6 +110,5 @@
     deliverPendingSession();
   }
 
-  window.addEventListener('WebChannelMessageToChrome', handlePageMessage);
-  document.addEventListener('WebChannelMessageToChrome', handlePageMessage);
+  window.addEventListener('message', handlePageMessage);
 })();

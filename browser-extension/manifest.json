@@ -1,18 +1,25 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "FoxyforVPS Firefox Sign-in Bridge",
   "version": "1.0.0",
   "description": "Bridges the Firefox Accounts browser sign-in to a FoxyforVPS panel only after explicit confirmation.",
   "browser_specific_settings": {
     "gecko": {
       "id": "{21e68d7a-862a-4d57-baa1-3d7c462faab1}",
-      "strict_min_version": "120.0"
+      "strict_min_version": "128.0"
     }
   },
-  "permissions": [
+  "host_permissions": [
     "https://accounts.firefox.com/*"
   ],
   "content_scripts": [
+    {
+      "matches": ["https://accounts.firefox.com/*"],
+      "js": ["page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
     {
       "matches": ["https://accounts.firefox.com/*"],
       "js": ["content.js"],
