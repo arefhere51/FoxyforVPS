@@ -6,7 +6,7 @@ function render(result) {
   if (!result.pageHookReady) {
     statusEl.textContent = 'افزونه هست، اما hook صفحه فعال نیست.';
     statusEl.classList.add('warn');
-    detailEl.textContent = 'صفحهٔ accounts.firefox.com را تازه‌سازی کن. اگر درست نشد، افزونه را Remove کن و نسخهٔ 1.1.1 را دوباره بارگذاری کن.';
+    detailEl.textContent = 'تب accounts.firefox.com را تازه‌سازی کن. اگر باز هم hook فعال نشد، دسترسی افزونه به این سایت را در about:addons بررسی کن و افزونه را Remove و نسخهٔ 1.1.2 را دوباره بارگذاری کن.';
   } else if (!result.bridgeReady) {
     statusEl.textContent = 'افزونه فعال است؛ هنوز پنل را دریافت نکرده.';
     statusEl.classList.add('warn');
@@ -35,15 +35,21 @@ function render(result) {
 }
 
 async function showStatus() {
+  let tab = null;
   try {
-    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     if (!tab || !Number.isInteger(tab.id)) throw new Error('no active tab');
     const result = await browser.tabs.sendMessage(tab.id, { type: 'foxyforvps:bridge-status' });
     render(result);
   } catch (_) {
-    statusEl.textContent = 'افزونه روی این تب فعال نیست.';
+    let host = '';
+    try { host = tab?.url ? new URL(tab.url).hostname : ''; } catch (_) {}
+    const isFxA = host === 'accounts.firefox.com';
+    statusEl.textContent = isFxA ? 'دامنه درست است، اما اسکریپت افزونه در این تب پاسخ نمی‌دهد.' : 'افزونه روی تب فعال‌شده اجرا نمی‌شود.';
     statusEl.className = 'status warn';
-    detailEl.textContent = 'این popup فقط روی accounts.firefox.com وضعیت را نشان می‌دهد. ورود را از پنل شروع کن؛ افزونه پنجرهٔ ورود را خودش باز نمی‌کند.';
+    detailEl.textContent = isFxA
+      ? 'در about:addons دسترسی FoxyforVPS به accounts.firefox.com را بررسی کن؛ سپس همین تب را Reload کن. بعد از آن ورود را دوباره از پنل شروع کن تا رویداد ورود از دست نرود.'
+      : `تب فعلی${host ? ` (${host})` : ''} صفحهٔ Firefox Accounts نیست. به تب accounts.firefox.com برو؛ ورود را از پنل شروع کن و همان تب را بررسی کن.`;
   }
 }
 

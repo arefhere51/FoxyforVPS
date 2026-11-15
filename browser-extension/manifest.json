@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FoxyforVPS Firefox Sign-in Bridge",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Bridges the Firefox Accounts browser sign-in to a FoxyforVPS panel only after explicit confirmation.",
   "browser_specific_settings": {
     "gecko": {
@@ -12,6 +12,7 @@
   "host_permissions": [
     "https://accounts.firefox.com/*"
   ],
+  "permissions": ["activeTab"],
   "action": {
     "default_title": "FoxyforVPS Login Bridge",
     "default_popup": "popup.html"
