@@ -7,6 +7,11 @@
   const NONCE_RE = /^[A-Za-z0-9_-]{43}$/;
   const PAGE_CHANNEL = 'foxyforvps:page-webchannel:v1';
   let bridge = null;
+  let pageHookReady = false;
+  let loginEventSeen = false;
+  let sessionSent = false;
+  let consentDenied = false;
+  let deliveryFailed = false;
   let pendingSession = null;
   let delivering = false;
   let sentTokenDigests = new Set();
@@ -39,19 +44,24 @@
       const accepted = window.confirm(
         `FoxyforVPS می‌خواهد نشست موقت Firefox را فقط به پنل زیر بفرستد:\n\n${bridge.origin}\n\nگذرواژه یا کد تأیید ارسال نمی‌شود. اجازه می‌دهی؟`
       );
-      if (!accepted) return;
+      if (!accepted) {
+        consentDenied = true;
+        return;
+      }
       window.opener.postMessage({
         type: 'foxyforvps:fxa-session',
         nonce: bridge.nonce,
         email: session.email,
         sessionToken: session.token,
       }, bridge.origin);
+      sessionSent = true;
       if (fingerprint) {
         sentTokenDigests.add(fingerprint);
         if (sentTokenDigests.size > 4) sentTokenDigests = new Set([...sentTokenDigests].slice(-4));
       }
     } catch (_) {
       pendingSession = null;
+      deliveryFailed = true;
     } finally {
       session.token = '';
       delivering = false;
@@ -60,7 +70,7 @@
   }
 
   window.addEventListener('message', event => {
-    if (event.source !== window.opener || !event.data || event.data.type !== 'foxyforvps:bridge-init') return;
+    if (!event.data || event.data.type !== 'foxyforvps:bridge-init') return;
     const nonce = event.data.nonce;
     if (typeof nonce !== 'string' || !NONCE_RE.test(nonce) || !isAllowedPanelOrigin(event.origin)) return;
     if (bridge && (bridge.nonce !== nonce || bridge.origin !== event.origin)) return;
@@ -81,7 +91,12 @@
   function handlePageMessage(event) {
     if (event.source !== window || event.origin !== location.origin) return;
     const envelope = event.data;
-    if (!envelope || envelope.channel !== PAGE_CHANNEL || envelope.direction !== 'from-page' || typeof envelope.detail !== 'string') return;
+    if (!envelope || envelope.channel !== PAGE_CHANNEL) return;
+    if (envelope.direction === 'hook-ready') {
+      pageHookReady = true;
+      return;
+    }
+    if (envelope.direction !== 'from-page' || typeof envelope.detail !== 'string') return;
     let detail;
     try { detail = JSON.parse(envelope.detail); } catch (_) { return; }
     if (!detail || typeof detail.id !== 'string' || !detail.message || typeof detail.message !== 'object') return;
@@ -105,10 +120,27 @@
     if (!data || typeof data !== 'object') return;
     const token = data.sessionToken || data.token;
     if (typeof token !== 'string' || !TOKEN_RE.test(token)) return;
+    loginEventSeen = true;
+    sessionSent = false;
+    consentDenied = false;
+    deliveryFailed = false;
     const email = typeof data.email === 'string' ? data.email.slice(0, 254) : '';
     pendingSession = { email, token };
     deliverPendingSession();
   }
 
   window.addEventListener('message', handlePageMessage);
+  browser.runtime.onMessage.addListener(message => {
+    if (message?.type === 'foxyforvps:bridge-status') {
+      return Promise.resolve({
+        contentScriptReady: true,
+        pageHookReady,
+        bridgeReady: Boolean(bridge),
+        loginEventSeen,
+        sessionSent,
+        consentDenied,
+        deliveryFailed,
+      });
+    }
+  });
 })();

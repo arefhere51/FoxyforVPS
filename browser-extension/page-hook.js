@@ -36,4 +36,5 @@
       }
     }
   });
+  window.postMessage({ channel: CHANNEL, direction: 'hook-ready' }, location.origin);
 })();

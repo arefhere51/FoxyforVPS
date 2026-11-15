@@ -13,7 +13,9 @@ Firefox باید نسخهٔ 128 یا جدیدتر باشد.
 5. در پنل **ورود در پنجرهٔ رسمی Firefox** را بزن. پنجرهٔ `accounts.firefox.com` باز می‌شود. گذرواژه، passkey، کد ایمیل و TOTP را فقط همان‌جا وارد کن.
 6. پس از نمایش پنجرهٔ اجازه، مقصد را دقیق بررسی کن. اگر مقصد پنل خودت است، انتقال را تأیید کن. پنل تا ۱۵ دقیقه وضعیت تأیید را بررسی می‌کند.
 
-نسخهٔ جدید افزونه دو بخش دارد: hook رویداد WebChannel را در محیط صفحهٔ Firefox می‌خواند؛ بخش ایزوله پیام را می‌گیرد، اجازهٔ کاربر را می‌پرسد و نشست را به تب پنل می‌فرستد. اگر بعد از حدود دو دقیقه پنل نوشت «افزونه پاسخی نداد»، نسخهٔ قبلی را حذف کن، نسخهٔ تازه را بارگذاری کن، تب پنل را تازه‌سازی کن و ورود را از نو آغاز کن.
+افزونه خودش پنجرهٔ جداگانه باز نمی‌کند؛ ورود باید از پنل آغاز شود. پس از بارگذاری، آیکن **FoxyforVPS Login Bridge** در فهرست/نوار افزونه‌های Firefox دارد. وقتی پنجرهٔ Firefox Accounts باز شد، روی آیکن افزونه بزن: popup مرحله را نشان می‌دهد—فعال‌بودن hook، اتصال به پنل، دیده‌شدن رویداد ورود، تأیید یا ارسال نشست. این تشخیص توکن خام را نمایش یا ذخیره نمی‌کند.
+
+نسخهٔ افزونه دو بخش دارد: hook رویداد WebChannel را در محیط صفحهٔ Firefox می‌خواند؛ بخش ایزوله پیام را می‌گیرد، اجازهٔ کاربر را می‌پرسد و نشست را به تب پنل می‌فرستد. اگر popup گفت hook فعال نیست، تب Firefox Accounts را تازه‌سازی کن. اگر گفت «هنوز پنل را دریافت نکرده»، صفحه را دستی باز نکن؛ ورود را از دکمهٔ پنل آغاز کن. اگر بعد از حدود دو دقیقه پنل نوشت «افزونه پاسخی نداد»، افزونهٔ قبلی را Remove کن، نسخهٔ تازه را بارگذاری کن، تب پنل را تازه‌سازی کن و ورود را از نو آغاز کن.
 
 افزونه فقط مجوز `https://accounts.firefox.com/*` دارد و نشست را در storage افزونه ذخیره نمی‌کند. افزونهٔ موقت Firefox معمولاً پس از بستن/بازکردن مرورگر غیرفعال یا حذف می‌شود؛ برای استفادهٔ دائمی باید بستهٔ امضاشدهٔ افزونه نصب شود. پروژه فایل XPI امضاشده ارائه نمی‌کند.
 
@@ -32,6 +34,7 @@ Firefox باید نسخهٔ 128 یا جدیدتر باشد.
 ## منابع فنی
 
 - [Mozilla: Firefox Accounts OAuth overview](https://vladikoff.github.io/app-services-site/docs/accounts/welcome.html)
+- [Mozilla: WebChannel reference](https://mozilla.github.io/ecosystem-platform/reference/webchannels)
 - [Mozilla Ecosystem Platform: integration with FxA](https://mozilla.github.io/ecosystem-platform/relying-parties/tutorials/integration-with-fxa)
 - [Mozilla Ecosystem Platform: FxA API](https://mozilla.github.io/ecosystem-platform/api)
 - [Arman VPN: browser sign-in implementation](https://github.com/armanlife/firefox-vpn-client/blob/main/app/lib/ui/browser_signin.dart)
