@@ -1,23 +1,32 @@
-# Firefox Accounts sign-in: client flow vs panel flow
+# Firefox Accounts sign-in flow
 
-## What FoxyVPN Android does
+## How FoxyVPN Android signs in
 
-The Android implementation does not send a Firefox password to its backend. `BrowserLoginScreen.kt` opens the official Firefox Accounts login URL in an Android `WebView`, injects a small JavaScript listener for `WebChannelMessageToChrome`, exposes a `@JavascriptInterface` bridge, answers `fxaccounts:fxa_status` and `fxaccounts:can_link_account`, and receives the `sessionToken` from `fxaccounts:login`. `FxaAuthRepository.kt` then validates/exchanges the session token with Firefox Accounts and requests destruction of the session token after completing sign-in (the server-side destruction request is best-effort).
+The Android implementation opens the official Firefox Accounts flow in a WebView, bridges the Firefox WebChannel login event, and receives a `sessionToken`. The application then exchanges that session for OAuth credentials and asks Firefox Accounts to destroy the temporary session token (best effort).
 
 Source references:
 
 - https://github.com/Vauth/FoxyVPN/blob/main/app/src/main/java/com/vauth/foxyvpn/ui/screens/BrowserLoginScreen.kt
 - https://github.com/Vauth/FoxyVPN/blob/main/app/src/main/java/com/vauth/foxyvpn/data/FxaAuthRepository.kt
 
-## FoxyforVPS direct-login implementation
+## Current FoxyforVPS flow
 
-The self-hosted web panel cannot receive a browser-internal WebChannel event from a regular cross-origin web page. To meet the requested panel-only workflow, the VPS runs a temporary headless Chromium session and uses a Playwright binding to mirror the limited WebChannel bridge above. It fills the official email/password form and only returns the 64-character session token to the Python process. The existing FxA code then exchanges it and requests destruction of the temporary session token (best-effort).
+The web panel does not use the browser extension or headless Chromium. It sends the email and password to the authenticated VPS backend over HTTPS (or an SSH tunnel). The backend derives FxA `authPW` using the account protocol and submits a direct `POST /v1/account/login` request. The plaintext password is not sent to the FxA login endpoint and is not written to persistent storage, command-line arguments, environment variables, or application logs.
 
-The Firefox password does cross the HTTPS connection to the VPS. Code does not put it in files, a database, process arguments, environment variables, or application logs; it is kept temporarily in request memory and sent to the separate browser process over stdin. The browser process runs under a dedicated unprivileged Linux user, has no persistent browser profile, and is closed after the login attempt. This does not protect credentials from the VPS root administrator. Public use requires HTTPS on the Caddy endpoint; the only HTTP use supported is local access through an SSH tunnel. CAPTCHA, MFA, email-verification, or other anti-automation checkpoints are not bypassed; those attempts fail without storing the password.
+If FxA requires email-code or TOTP verification, the API returns a temporary session token. FoxyforVPS keeps that token only in process memory, keyed by a random one-time attempt ID, with a 15-minute expiry and a five-try verification limit. Email-code and TOTP responses are submitted with Hawk authentication; email-link verification can be continued after the user clicks the link. Temporary attempts are deleted on completion/cancellation and disappear on process restart. The session token is exchanged through the existing OAuth path and a best-effort session-destroy request is made.
 
-## Mozilla integration boundary
+A blocked-login response can trigger Firefox's email unblock-code flow. The password is not retained by the server: the user re-enters it together with the emailed unblock code. The backend sends only the derived `authPW` in the subsequent FxA login request.
 
-A conventional web OAuth callback is distinct from Firefox's WebChannel-based browser/desktop flow. Mozilla's relying-party guide requires a registered OAuth client and matching redirect URI; this project does not possess an OAuth client registered for the user's panel hostname.
+## Anti-bot and transport boundary
 
-- https://mozilla.github.io/ecosystem-platform/reference/webchannels
-- https://mozilla.github.io/ecosystem-platform/relying-parties/tutorials/integration-with-fxa
+The API-login structure and derivation were inspected in the public Arman VPN client source:
+
+- https://github.com/armanlife/arman-vpn-client/blob/main/core/internal/fxa/fxa.go
+- https://github.com/armanlife/arman-vpn-client/blob/main/core/internal/fxa/hawk.go
+- https://github.com/armanlife/arman-vpn-client/blob/main/core/internal/service/signin_flow.go
+
+FoxyforVPS implements the direct login request and verification stages, but does **not** port Arman's custom HTTP-406/Fastly challenge solver. If Firefox Accounts responds with HTTP 406, FoxyforVPS reports the challenge and stops. It does not automate CAPTCHA or anti-bot challenge solving. The API, server-side policy, network egress and account security settings can all prevent direct login; success is not guaranteed.
+
+## Credential boundary
+
+The Firefox password traverses the VPS connection, so public panel access must use HTTPS and private access should use SSH tunneling. Root on the VPS can inspect application memory. OAuth access/refresh credentials required by the service remain in `/var/lib/foxyforvps/`; raw Firefox password and temporary session attempts are not persisted.

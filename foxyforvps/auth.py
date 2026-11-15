@@ -20,7 +20,7 @@ FXA_TOKEN_FALLBACK = "https://api.accounts.firefox.com/v1/oauth/token"
 FXA_VERIFY = "https://api.accounts.firefox.com/v1/recovery_email/status"
 FXA_DESTROY = "https://api.accounts.firefox.com/v1/session/destroy"
 GUARDIAN = "https://vpn.mozilla.org"
-UA = "MozillaVPN/2.24.0 (sys:android 14)"
+UA = "Mozilla/5.0 (X11; Linux x86_64; rv:158.0) Gecko/20100101 Firefox/158.0"
 
 
 class AuthError(RuntimeError):
@@ -67,7 +67,7 @@ def _session_creds(session_hex: str) -> tuple[str, bytes]:
 
 
 class FirefoxAccount:
-    """Firefox Accounts / Guardian client. Passwords are never accepted or stored."""
+    """Firefox Accounts OAuth and Guardian token/quota client."""
 
     def __init__(self, state_dir: Path):
         self.state_dir = state_dir
@@ -111,7 +111,7 @@ class FirefoxAccount:
     async def sign_in_with_session_token(self, session_token: str) -> dict:
         token = "".join(session_token.split()).strip('"').lower()
         if len(token) != 64 or any(ch not in "0123456789abcdef" for ch in token):
-            raise AuthError("A Firefox Accounts browser session token is required (64 hexadecimal characters). Passwords are not supported here.")
+            raise AuthError("A verified Firefox Accounts session token is required (64 hexadecimal characters).")
         verified = await self._hawk_json(FXA_VERIFY, "GET", token)
         if not verified.get("verified"):
             raise AuthError("The Firefox Accounts session is not verified. Complete the official browser sign-in first.")

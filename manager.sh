@@ -20,13 +20,79 @@ fetch_source(){
   [[ -d "$SOURCE_DIR" ]] || { echo "Repository archive has an unexpected layout." >&2; exit 1; }
 }
 
+resolve_global_ips(){
+  python3 - "$1" <<'PY'
+import ipaddress, socket, sys
+ips=set()
+for item in socket.getaddrinfo(sys.argv[1], None, type=socket.SOCK_STREAM):
+    try:
+        addr=ipaddress.ip_address(item[4][0].split('%', 1)[0])
+        if addr.is_global:
+            ips.add(str(addr))
+    except ValueError:
+        pass
+print('\n'.join(sorted(ips)))
+PY
+}
+
+bootstrap_public_ips(){
+  local domain="$1" resolved observed="" ip family mismatch=0 actual_seen=0
+  resolved="$(resolve_global_ips "$domain" 2>/dev/null || true)"
+  [[ -n "$resolved" ]] || { echo "The hostname has no public A/AAAA answer." >&2; return 1; }
+  for family in 4 6; do
+    ip="$(curl -"$family" -fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+    [[ -n "$ip" ]] || continue
+    actual_seen=1
+    if grep -Fxq "$ip" <<<"$resolved"; then
+      observed+="${observed:+$'\n'}$ip"
+    fi
+  done
+  if [[ -n "$observed" ]]; then
+    while IFS= read -r ip; do
+      [[ -z "$ip" ]] && continue
+      grep -Fxq "$ip" <<<"$observed" || mismatch=1
+    done <<<"$resolved"
+    if [[ "$mismatch" == "1" ]]; then
+      echo "The hostname DNS does not resolve exclusively to this VPS public IP. Set its DNS record to DNS-only/direct mode and retry." >&2
+      return 1
+    fi
+    printf '%s\n' "$observed" | sort -u
+  elif [[ "$actual_seen" == "1" ]]; then
+    echo "The hostname does not resolve to this VPS public IP. Set its DNS record to DNS-only/direct mode and retry." >&2
+    return 1
+  else
+    echo "Could not independently discover the VPS public IP; using the hostname's public DNS answers as the allowlist." >&2
+    printf '%s\n' "$resolved" | sort -u
+  fi
+}
+
+write_dynamic_caddyfile(){
+  local target="$1"
+  cat > "$target" <<'EOF'
+{
+  admin off
+  on_demand_tls {
+    ask http://127.0.0.1:8778/api/tls/authorize
+  }
+}
+
+https://:8777 {
+  tls {
+    on_demand
+  }
+  reverse_proxy 127.0.0.1:8778
+}
+EOF
+  chmod 0640 "$target"
+}
+
 install_or_update(){
   need_root
   umask 022
   fetch_source
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y ca-certificates curl git python3 python3-venv python3-pip build-essential golang-go openssl util-linux
+  apt-get install -y ca-certificates curl git python3 python3-venv python3-pip build-essential golang-go openssl
   install -d -m 0700 "$ETC_DIR" "$STATE_DIR"
   local new_admin_password=0
   if [[ ! -s "$ETC_DIR/admin-password" ]]; then
@@ -35,25 +101,18 @@ install_or_update(){
     new_admin_password=1
   fi
   systemctl stop foxyforvps-web.service foxyforvps-core.service 2>/dev/null || true
+  if [[ -f "$ETC_DIR/.created-browser-user" ]]; then
+    rm -rf /var/lib/foxyforvps-browser /opt/foxyforvps-browsers
+    userdel foxyvpsbrowser 2>/dev/null || true
+    groupdel foxyvpsbrowser 2>/dev/null || true
+    rm -f "$ETC_DIR/.created-browser-user"
+  fi
   install -d -m 0755 "$APP_DIR"
   cp -a "$SOURCE_DIR/." "$APP_DIR/"
+  rm -f "$APP_DIR/foxyforvps/fxa_browser_login.py" "$APP_DIR/tests/test_browser_login.py"
+  rm -rf "$APP_DIR/browser-helper" "$APP_DIR/.venv"
   python3 -m venv "$APP_DIR/.venv"
   "$APP_DIR/.venv/bin/pip" install --disable-pip-version-check -q -r "$APP_DIR/requirements.txt"
-  # The sign-in browser runs as a separate unprivileged user and must be able
-  # to traverse the venv and import packages. No secrets belong in the venv.
-  chmod 0755 "$APP_DIR" "$APP_DIR/.venv"
-  chmod -R a+rX "$APP_DIR/.venv"
-  if ! id -u foxyvpsbrowser >/dev/null 2>&1; then
-    useradd --system --home-dir /var/lib/foxyforvps-browser --create-home --shell /usr/sbin/nologin foxyvpsbrowser
-    touch "$ETC_DIR/.created-browser-user"
-    chmod 0600 "$ETC_DIR/.created-browser-user"
-  fi
-  install -d -o foxyvpsbrowser -g foxyvpsbrowser -m 0700 /var/lib/foxyforvps-browser
-  install -d -o root -g root -m 0755 /opt/foxyforvps-browsers
-  if ! PLAYWRIGHT_BROWSERS_PATH=/opt/foxyforvps-browsers "$APP_DIR/.venv/bin/python" -c 'from playwright.sync_api import sync_playwright; import os; p=sync_playwright().start(); ok=os.path.isfile(p.chromium.executable_path) and os.access(p.chromium.executable_path, os.X_OK); p.stop(); raise SystemExit(0 if ok else 1)' >/dev/null 2>&1; then
-    PLAYWRIGHT_BROWSERS_PATH=/opt/foxyforvps-browsers "$APP_DIR/.venv/bin/python" -m playwright install --with-deps chromium
-    chmod -R a+rX /opt/foxyforvps-browsers
-  fi
   install -m 0644 "$APP_DIR/systemd/foxyforvps-web.service" /etc/systemd/system/foxyforvps-web.service
   install -m 0644 "$APP_DIR/systemd/foxyforvps-core.service" /etc/systemd/system/foxyforvps-core.service
   install -m 0755 "$APP_DIR/manager.sh" /usr/local/bin/foxyforvpsctl
@@ -63,6 +122,32 @@ install_or_update(){
   systemctl daemon-reload
   systemctl enable foxyforvps-web.service
   systemctl restart foxyforvps-web.service
+  if systemctl is-active --quiet foxyforvps-public.service && [[ -s "$ETC_DIR/public-domain" ]]; then
+    local public_domain ips next_caddy ips_tmp
+    public_domain="$(cat "$ETC_DIR/public-domain")"
+    if ips="$(bootstrap_public_ips "$public_domain")"; then
+      ips_tmp="$ETC_DIR/public-ips.next"
+      printf '%s\n' "$ips" > "$ips_tmp"
+      chmod 0600 "$ips_tmp"
+      mv "$ips_tmp" "$ETC_DIR/public-ips"
+      next_caddy="$ETC_DIR/Caddyfile.next"
+      write_dynamic_caddyfile "$next_caddy"
+      if /usr/bin/caddy validate --config "$next_caddy" --adapter caddyfile >/dev/null 2>&1; then
+        mv "$next_caddy" "$ETC_DIR/Caddyfile"
+        chmod 0640 "$ETC_DIR/Caddyfile"
+        if systemctl restart foxyforvps-public.service; then
+          echo "Public HTTPS now accepts DNS hostnames pointing only to this VPS IP (on-demand certificates)."
+        else
+          echo "WARNING: public Caddy reload failed; inspect sudo systemctl status foxyforvps-public." >&2
+        fi
+      else
+        rm -f "$next_caddy"
+        echo "WARNING: dynamic Caddy config validation failed; previous public config was kept." >&2
+      fi
+    else
+      echo "WARNING: could not verify the public hostname; current Caddy config was kept unchanged." >&2
+    fi
+  fi
   echo
   echo "FoxyforVPS installed/updated."
   echo "Admin user: admin"
@@ -105,6 +190,11 @@ public_enable(){
   if [[ ! "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; then
     echo "Invalid hostname. Use a DNS name, not an IP address or URL." >&2; return 2
   fi
+  local allowed_ips
+  if ! allowed_ips="$(bootstrap_public_ips "$domain")"; then
+    echo "Could not verify that the bootstrap hostname points directly to this VPS." >&2
+    return 1
+  fi
   if [[ ! -s "$ETC_DIR/admin-password" ]]; then
     echo "Install FoxyforVPS first so the admin password and backend exist." >&2; return 1
   fi
@@ -119,16 +209,9 @@ public_enable(){
   install -d -m 0750 "$ETC_DIR" "$STATE_DIR/caddy-data" "$STATE_DIR/caddy-config"
   printf '%s\n' "$domain" > "$ETC_DIR/public-domain"
   chmod 0600 "$ETC_DIR/public-domain"
-  cat > "$ETC_DIR/Caddyfile" <<EOF
-{
-  admin off
-}
-
-${domain}:8777 {
-  reverse_proxy 127.0.0.1:8778
-}
-EOF
-  chmod 0640 "$ETC_DIR/Caddyfile"
+  printf '%s\n' "$allowed_ips" > "$ETC_DIR/public-ips"
+  chmod 0600 "$ETC_DIR/public-ips"
+  write_dynamic_caddyfile "$ETC_DIR/Caddyfile"
   cat > /etc/systemd/system/foxyforvps-public.service <<EOF
 [Unit]
 Description=FoxyforVPS public HTTPS reverse proxy
@@ -160,14 +243,15 @@ EOF
   systemctl enable --now foxyforvps-public.service
   echo
   echo "Public HTTPS panel configured: https://${domain}:8777"
-  echo "Ensure DNS A/AAAA points to this VPS and allow inbound TCP 80, 443, and 8777 for automatic certificate challenges and HTTPS."
+  echo "Additional DNS hostnames resolving only to this same VPS IP are accepted automatically; Caddy obtains HTTPS certificates on demand."
+  echo "Use direct/DNS-only records, and allow inbound TCP 80, 443, and 8777 for certificate challenges and HTTPS."
   echo "Keep the admin password private. Do not add a plaintext port-forward for 8777."
 }
 
 public_disable(){
   need_root
   systemctl disable --now foxyforvps-public.service 2>/dev/null || true
-  rm -f /etc/systemd/system/foxyforvps-public.service "$ETC_DIR/Caddyfile" "$ETC_DIR/public-domain"
+  rm -f /etc/systemd/system/foxyforvps-public.service "$ETC_DIR/Caddyfile" "$ETC_DIR/Caddyfile.next" "$ETC_DIR/public-domain" "$ETC_DIR/public-ips" "$ETC_DIR/public-ips.next"
   rm -rf "$STATE_DIR/caddy-data" "$STATE_DIR/caddy-config"
   systemctl daemon-reload
   echo "FoxyforVPS public listener stopped and removed. The app backend remains on VPS loopback:8778."

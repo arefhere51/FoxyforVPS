@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import hmac
 import hashlib
+import ipaddress
 import json
 import os
+import re
 import secrets
+import socket
 import subprocess
 import time
 from contextlib import asynccontextmanager
@@ -14,14 +17,14 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .auth import AuthError, FirefoxAccount
 from .engine import write_config
-from .fxa_browser_login import FirefoxBrowserLoginError, capture_firefox_session
+from .fxa_password_login import LoginRejected, start_password_login, verify_login_step
 from .servers import DirectoryError, fetch_locations
 
 STATE_DIR = Path(os.getenv("FOXY_STATE_DIR", "/var/lib/foxyforvps"))
@@ -31,9 +34,83 @@ TOKEN_FILE = Path(os.getenv("FOXY_TOKEN_FILE", "/var/lib/foxyforvps/bearer.token
 CORE_SERVICE = os.getenv("FOXY_CORE_SERVICE", "foxyforvps-core")
 ADMIN_USER = os.getenv("FOXY_ADMIN_USER", "admin")
 ADMIN_PASSWORD_FILE = Path(os.getenv("FOXY_ADMIN_PASSWORD_FILE", "/etc/foxyforvps/admin-password"))
+PUBLIC_IPS_FILE = Path(os.getenv("FOXY_PUBLIC_IPS_FILE", "/etc/foxyforvps/public-ips"))
 STATE_FILE = STATE_DIR / "settings.json"
 QUOTA_FILE = STATE_DIR / "quota.json"
 security = HTTPBasic(auto_error=False)
+_TLS_DNS_CACHE: dict[str, tuple[float, frozenset[str]]] = {}
+_TLS_DNS_SEMAPHORE = asyncio.Semaphore(8)
+
+
+def _normalize_public_domain(value: str) -> str | None:
+    name = value.strip().rstrip(".").lower()
+    try:
+        name = name.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    if not name or len(name) > 253 or "." not in name:
+        return None
+    try:
+        ipaddress.ip_address(name)
+        return None
+    except ValueError:
+        pass
+    labels = name.split(".")
+    label_re = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+    tld = labels[-1]
+    if len(tld) < 2 or not (tld.isalpha() or tld.startswith("xn--")) or any(not label_re.fullmatch(label) for label in labels):
+        return None
+    if name in {"localhost", "local", "internal", "home.arpa"}:
+        return None
+    return name
+
+
+def _lookup_public_ips_sync(domain: str) -> frozenset[str]:
+    result: set[str] = set()
+    for answer in socket.getaddrinfo(domain, None, type=socket.SOCK_STREAM):
+        raw = answer[4][0].split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if address.is_global:
+            result.add(str(address))
+    return frozenset(result)
+
+
+async def _lookup_public_ips(domain: str) -> frozenset[str]:
+    now = time.monotonic()
+    cached = _TLS_DNS_CACHE.get(domain)
+    if cached and cached[0] > now:
+        return cached[1]
+    try:
+        async with _TLS_DNS_SEMAPHORE:
+            result = await asyncio.wait_for(asyncio.to_thread(_lookup_public_ips_sync, domain), timeout=3.0)
+    except (OSError, asyncio.TimeoutError, UnicodeError):
+        result = frozenset()
+    _TLS_DNS_CACHE[domain] = (now + (60 if result else 10), result)
+    if len(_TLS_DNS_CACHE) > 1024:
+        expired = [key for key, (expires, _) in _TLS_DNS_CACHE.items() if expires <= now]
+        for key in expired:
+            _TLS_DNS_CACHE.pop(key, None)
+        while len(_TLS_DNS_CACHE) > 1024:
+            _TLS_DNS_CACHE.pop(next(iter(_TLS_DNS_CACHE)))
+    return result
+
+
+def _allowed_public_ips() -> set[str]:
+    result = set()
+    try:
+        for line in PUBLIC_IPS_FILE.read_text().splitlines():
+            try:
+                address = ipaddress.ip_address(line.strip())
+            except ValueError:
+                continue
+            if address.is_global:
+                result.add(str(address))
+    except OSError:
+        pass
+    return result
 
 
 def _read_json(path: Path, fallback):
@@ -110,6 +187,9 @@ locations_cache: list[dict] = []
 cache_at = 0.0
 refresh_task: asyncio.Task | None = None
 fxa_login_lock = asyncio.Lock()
+login_attempts: dict[str, dict] = {}
+LOGIN_ATTEMPT_TTL = 15 * 60
+LOGIN_ATTEMPT_LIMIT = 16
 
 
 async def _directory(force: bool = False) -> list[dict]:
@@ -216,9 +296,33 @@ async def same_origin_guard(request: Request, call_next):
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
+@app.get("/api/tls/authorize")
+async def authorize_dynamic_certificate(request: Request, domain: str = ""):
+    # Uvicorn is configured with --no-proxy-headers so this is the TCP peer,
+    # not a client-supplied X-Forwarded-For value. Only local Caddy may ask.
+    peer = request.client.host if request.client else ""
+    if peer not in {"127.0.0.1", "::1"}:
+        raise HTTPException(403, "Local TLS issuer required.")
+    normalized = _normalize_public_domain(domain)
+    allowed = _allowed_public_ips()
+    if not normalized or not allowed:
+        raise HTTPException(403, "Domain is not authorized for this VPS.")
+    resolved = await _lookup_public_ips(normalized)
+    if not resolved or not resolved.issubset(allowed):
+        raise HTTPException(403, "Domain DNS must point only to this VPS.")
+    return Response(status_code=204)
+
+
 class FirefoxCredentialsInput(BaseModel):
     email: str = Field(min_length=5, max_length=254)
     password: str = Field(min_length=1, max_length=256)
+    unblock_code: str = Field(default="", max_length=64)
+
+
+class LoginVerificationInput(BaseModel):
+    attempt_id: str = Field(min_length=20, max_length=128)
+    code: str = Field(default="", max_length=64)
+    confirmed: bool = False
 
 
 class AdminPasswordInput(BaseModel):
@@ -278,28 +382,92 @@ async def login_with_password(data: FirefoxCredentialsInput, _=Depends(require_a
         data.password = ""
         raise HTTPException(422, "ایمیل معتبر Firefox را وارد کن.")
     password = data.password
+    unblock_code = data.unblock_code
     data.password = ""
-    session_token = ""
+    data.unblock_code = ""
     try:
         async with fxa_login_lock:
-            session_token = await asyncio.to_thread(capture_firefox_session, email, password)
-            quota = await account.sign_in_with_session_token(session_token)
-            pass_data = await account.proxy_pass()
-            _save_json(QUOTA_FILE, {**pass_data, **{k: v for k, v in quota.items() if v is not None}, "checked_at": int(time.time())})
-            _write_bearer(pass_data["token"])
-            try:
-                _apply_core(await _directory())
-            except Exception as exc:
-                raise HTTPException(500, f"Authentication succeeded, but tunnel engine did not start: {exc}") from exc
+            result = await start_password_login(account.http, email, password, unblock_code)
+            stage = result["stage"]
+            if stage == "unblock_code":
+                return {"ok": False, "stage": stage, "email": result["email"], "message": result["message"]}
+            if stage != "verified":
+                _prune_login_attempts()
+                if len(login_attempts) >= LOGIN_ATTEMPT_LIMIT:
+                    raise HTTPException(429, "تلاش‌های ورود موقت زیادی باز است؛ کمی صبر کن و دوباره شروع کن.")
+                attempt_id = secrets.token_urlsafe(24)
+                login_attempts[attempt_id] = {
+                    "email": result["email"],
+                    "session_token": result["session_token"],
+                    "stage": stage,
+                    "created": time.monotonic(),
+                    "tries": 0,
+                }
+                return {"ok": False, "stage": stage, "attempt_id": attempt_id, "email": result["email"], "message": result["message"]}
+            quota = await _finish_account_login(result["session_token"])
             return {"ok": True, "quota": quota}
-    except FirefoxBrowserLoginError as exc:
+    except LoginRejected as exc:
         raise HTTPException(400, str(exc)) from exc
     except AuthError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(500, f"Authentication succeeded, but tunnel engine did not start: {exc}") from exc
     finally:
         data.password = ""
+        data.unblock_code = ""
         password = ""
-        session_token = ""
+
+
+def _prune_login_attempts() -> None:
+    now = time.monotonic()
+    for attempt_id, attempt in list(login_attempts.items()):
+        if now - attempt["created"] > LOGIN_ATTEMPT_TTL:
+            login_attempts.pop(attempt_id, None)
+
+
+async def _finish_account_login(session_token: str) -> dict:
+    quota = await account.sign_in_with_session_token(session_token)
+    pass_data = await account.proxy_pass()
+    _save_json(QUOTA_FILE, {**pass_data, **{k: v for k, v in quota.items() if v is not None}, "checked_at": int(time.time())})
+    _write_bearer(pass_data["token"])
+    _apply_core(await _directory())
+    return quota
+
+
+@app.post("/api/account/login-verify")
+async def verify_account_login(data: LoginVerificationInput, _=Depends(require_admin)):
+    _prune_login_attempts()
+    attempt = login_attempts.get(data.attempt_id)
+    if not attempt:
+        raise HTTPException(404, "مرحلهٔ ورود پیدا نشد یا منقضی شده است؛ دوباره وارد شو.")
+    stage = attempt["stage"]
+    if stage == "email_link" and not data.confirmed:
+        raise HTTPException(400, "ابتدا لینک تأیید Firefox را باز کن.")
+    try:
+        async with fxa_login_lock:
+            confirmed = await verify_login_step(account.http, attempt["session_token"], stage, data.code)
+            if not confirmed:
+                raise HTTPException(409, "Firefox هنوز تأیید ایمیل را ثبت نکرده است؛ پس از کلیک لینک دوباره ادامه بده.")
+            quota = await _finish_account_login(attempt["session_token"])
+            login_attempts.pop(data.attempt_id, None)
+            return {"ok": True, "quota": quota}
+    except LoginRejected as exc:
+        attempt["tries"] += 1
+        if attempt["tries"] >= 5:
+            login_attempts.pop(data.attempt_id, None)
+            raise HTTPException(400, "تعداد تلاش‌های کد تأیید تمام شد؛ ورود را از ابتدا شروع کن.") from exc
+        raise HTTPException(400, str(exc)) from exc
+    except AuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        login_attempts.pop(data.attempt_id, None)
+        raise HTTPException(500, f"ورود موفق شد، اما موتور تونل اجرا نشد: {exc}") from exc
+
+
+@app.delete("/api/account/login-attempt/{attempt_id}")
+async def cancel_account_login(attempt_id: str, _=Depends(require_admin)):
+    login_attempts.pop(attempt_id, None)
+    return {"ok": True}
 
 
 @app.post("/api/admin/password")
