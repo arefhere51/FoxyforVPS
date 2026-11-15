@@ -4,6 +4,8 @@
 
 ## نصب افزونه در Firefox دسکتاپ
 
+Firefox باید نسخهٔ 128 یا جدیدتر باشد.
+
 1. ZIP پروژه را روی همان رایانه‌ای که Firefox روی آن اجراست استخراج کن.
 2. در Firefox به `about:debugging#/runtime/this-firefox` برو.
 3. اگر نسخهٔ قبلی افزونه بارگذاری است، آن را با **Remove** حذف کن. سپس روی **Load Temporary Add-on…** بزن و فایل `browser-extension/manifest.json` را از پوشهٔ نسخهٔ جدید انتخاب کن.
